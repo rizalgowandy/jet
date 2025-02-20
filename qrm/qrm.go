@@ -5,9 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/go-jet/jet/v2/internal/utils/must"
 	"reflect"
-
-	"github.com/go-jet/jet/v2/internal/utils"
 )
 
 // ErrNoRows is returned by Query when query result set is empty
@@ -17,11 +16,11 @@ var ErrNoRows = errors.New("qrm: no rows in result set")
 // using context `ctx` into destination `destPtr`.
 // Destination can be either pointer to struct or pointer to slice of structs.
 // If destination is pointer to struct and query result set is empty, method returns qrm.ErrNoRows.
-func Query(ctx context.Context, db DB, query string, args []interface{}, destPtr interface{}) (rowsProcessed int64, err error) {
+func Query(ctx context.Context, db Queryable, query string, args []interface{}, destPtr interface{}) (rowsProcessed int64, err error) {
 
-	utils.MustBeInitializedPtr(db, "jet: db is nil")
-	utils.MustBeInitializedPtr(destPtr, "jet: destination is nil")
-	utils.MustBe(destPtr, reflect.Ptr, "jet: destination has to be a pointer to slice or pointer to struct")
+	must.BeInitializedPtr(db, "jet: db is nil")
+	must.BeInitializedPtr(destPtr, "jet: destination is nil")
+	must.BeTypeKind(destPtr, reflect.Ptr, "jet: destination has to be a pointer to slice or pointer to struct")
 
 	destinationPtrType := reflect.TypeOf(destPtr)
 
@@ -64,8 +63,8 @@ func Query(ctx context.Context, db DB, query string, args []interface{}, destPtr
 
 // ScanOneRowToDest will scan one row into struct destination
 func ScanOneRowToDest(scanContext *ScanContext, rows *sql.Rows, destPtr interface{}) error {
-	utils.MustBeInitializedPtr(destPtr, "jet: destination is nil")
-	utils.MustBe(destPtr, reflect.Ptr, "jet: destination has to be a pointer to slice or pointer to struct")
+	must.BeInitializedPtr(destPtr, "jet: destination is nil")
+	must.BeTypeKind(destPtr, reflect.Ptr, "jet: destination has to be a pointer to slice or pointer to struct")
 
 	if len(scanContext.row) == 0 {
 		return errors.New("empty row slice")
@@ -88,7 +87,7 @@ func ScanOneRowToDest(scanContext *ScanContext, rows *sql.Rows, destPtr interfac
 	return nil
 }
 
-func queryToSlice(ctx context.Context, db DB, query string, args []interface{}, slicePtr interface{}) (rowsProcessed int64, err error) {
+func queryToSlice(ctx context.Context, db Queryable, query string, args []interface{}, slicePtr interface{}) (rowsProcessed int64, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -149,7 +148,7 @@ func mapRowToSlice(
 		return
 	}
 
-	utils.TypeMustBe(sliceElemType, reflect.Struct, "jet: unsupported slice element type"+fieldToString(field))
+	must.TypeBeOfKind(sliceElemType, reflect.Struct, "jet: unsupported slice element type"+fieldToString(field))
 
 	structGroupKey := scanContext.getGroupKey(sliceElemType, field)
 
@@ -238,7 +237,7 @@ func mapRowToStruct(
 
 		if fieldMap.complexType {
 			var changed bool
-			changed, err = mapRowToDestinationValue(scanContext, groupKey, fieldValue, &field)
+			changed, err = mapRowToDestinationValue(scanContext, concat(groupKey, ":", field.Name), fieldValue, &field)
 
 			if err != nil {
 				return
@@ -324,7 +323,7 @@ func mapRowToDestinationPtr(
 	destPtrValue reflect.Value,
 	structField *reflect.StructField) (updated bool, err error) {
 
-	utils.ValueMustBe(destPtrValue, reflect.Ptr, "jet: internal error. Destination is not pointer.")
+	must.ValueBeOfTypeKind(destPtrValue, reflect.Ptr, "jet: internal error. Destination is not pointer.")
 
 	destValueKind := destPtrValue.Elem().Kind()
 

@@ -2,16 +2,17 @@ package mysql
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/go-jet/jet/v2/generator/metadata"
 	"github.com/go-jet/jet/v2/generator/template"
-	"github.com/go-jet/jet/v2/internal/utils"
-	"github.com/go-jet/jet/v2/internal/utils/throw"
 	"github.com/go-jet/jet/v2/mysql"
 	mysqldr "github.com/go-sql-driver/mysql"
 )
+
+const mysqlMaxConns = 10
 
 // DBConnection contains MySQL connection details
 type DBConnection struct {
@@ -25,26 +26,28 @@ type DBConnection struct {
 }
 
 // Generate generates jet files at destination dir from database connection details
-func Generate(destDir string, dbConn DBConnection, generatorTemplate ...template.Template) (err error) {
-	defer utils.ErrorCatch(&err)
-
+func Generate(destDir string, dbConn DBConnection, generatorTemplate ...template.Template) error {
 	connectionString := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", dbConn.User, dbConn.Password, dbConn.Host, dbConn.Port, dbConn.DBName)
 	if dbConn.Params != "" {
 		connectionString += "?" + dbConn.Params
 	}
 
-	db := openConnection(connectionString)
-	defer utils.DBClose(db)
+	db, err := openConnection(connectionString)
+	if err != nil {
+		return fmt.Errorf("failed to open db connection: %w", err)
+	}
+	defer db.Close()
 
-	generate(db, dbConn.DBName, destDir, generatorTemplate...)
+	err = GenerateDB(db, dbConn.DBName, destDir, generatorTemplate...)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
 
 // GenerateDSN opens connection via DSN string and does everything what Generate does.
-func GenerateDSN(dsn, destDir string, templates ...template.Template) (err error) {
-	defer utils.ErrorCatch(&err)
-
+func GenerateDSN(dsn, destDir string, templates ...template.Template) error {
 	// Special case for go mysql driver. It does not understand schema,
 	// so we need to trim it before passing to generator
 	// https://github.com/go-sql-driver/mysql#dsn-data-source-name
@@ -54,39 +57,63 @@ func GenerateDSN(dsn, destDir string, templates ...template.Template) (err error
 	}
 
 	cfg, err := mysqldr.ParseDSN(dsn)
-	throw.OnError(err)
+	if err != nil {
+		return fmt.Errorf("failed to parse DSN: %w", err)
+	}
 	if cfg.DBName == "" {
-		panic("database name is required")
+		return errors.New("database name is required")
 	}
 
-	db := openConnection(dsn)
-	defer utils.DBClose(db)
+	db, err := openConnection(dsn)
+	if err != nil {
+		return fmt.Errorf("failed to open db connection: %w", err)
+	}
+	defer db.Close()
 
-	generate(db, cfg.DBName, destDir, templates...)
+	err = GenerateDB(db, cfg.DBName, destDir, templates...)
+	if err != nil {
+		return fmt.Errorf("failed to generate: %w", err)
+	}
 
 	return nil
 }
 
-func openConnection(connectionString string) *sql.DB {
-	fmt.Println("Connecting to MySQL database: " + connectionString)
+func openConnection(connectionString string) (*sql.DB, error) {
+	fmt.Println("Connecting to MySQL database...")
 	db, err := sql.Open("mysql", connectionString)
-	throw.OnError(err)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open mysql connection: %w", err)
+	}
+
+	db.SetMaxOpenConns(mysqlMaxConns)
+	db.SetMaxIdleConns(mysqlMaxConns)
 
 	err = db.Ping()
-	throw.OnError(err)
+	if err != nil {
+		return nil, fmt.Errorf("failed to ping database: %w", err)
+	}
 
-	return db
+	return db, nil
 }
 
-func generate(db *sql.DB, dbName, destDir string, templates ...template.Template) {
+// GenerateDB generates jet files using the provided *sql.DB
+func GenerateDB(db *sql.DB, dbName, destDir string, templates ...template.Template) error {
 	fmt.Println("Retrieving database information...")
 	// No schemas in MySQL
-	schemaMetaData := metadata.GetSchema(db, &mySqlQuerySet{}, dbName)
+	schemaMetaData, err := metadata.GetSchema(db, &mySqlQuerySet{}, dbName)
+	if err != nil {
+		return fmt.Errorf("failed to get '%s' database metadata: %w", dbName, err)
+	}
 
 	genTemplate := template.Default(mysql.Dialect)
 	if len(templates) > 0 {
 		genTemplate = templates[0]
 	}
 
-	template.ProcessSchema(destDir, schemaMetaData, genTemplate)
+	err = template.ProcessSchema(destDir, schemaMetaData, genTemplate)
+	if err != nil {
+		return fmt.Errorf("failed to process '%s' database: %w", schemaMetaData.Name, err)
+	}
+
+	return nil
 }

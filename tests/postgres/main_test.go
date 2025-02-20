@@ -4,14 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/go-jet/jet/v2/stmtcache"
 	"github.com/go-jet/jet/v2/tests/internal/utils/repo"
-	"math/rand"
+	"github.com/jackc/pgx/v4/stdlib"
 	"os"
 	"runtime"
 	"testing"
-	"time"
-
-	"github.com/jackc/pgx/v4/stdlib"
 
 	"github.com/go-jet/jet/v2/postgres"
 	"github.com/go-jet/jet/v2/tests/dbconfig"
@@ -22,34 +20,78 @@ import (
 	_ "github.com/jackc/pgx/v4/stdlib"
 )
 
-var db *sql.DB
+var db *stmtcache.DB
 var testRoot string
 
+var source string
+var withStatementCaching bool
+
+const CockroachDB = "COCKROACH_DB"
+
+func init() {
+	source = os.Getenv("PG_SOURCE")
+	withStatementCaching = os.Getenv("JET_TESTS_WITH_STMT_CACHE") == "true"
+}
+
+func sourceIsCockroachDB() bool {
+	return source == CockroachDB
+}
+
+func skipForCockroachDB(t *testing.T) {
+	if sourceIsCockroachDB() {
+		t.SkipNow()
+	}
+}
+
 func TestMain(m *testing.M) {
-	rand.Seed(time.Now().Unix())
 	defer profile.Start().Stop()
 
 	setTestRoot()
 
-	for _, driverName := range []string{"pgx", "postgres"} {
-		fmt.Printf("\nRunning postgres tests for '%s' driver\n", driverName)
+	for _, driverName := range []string{"postgres", "pgx"} {
+
+		fmt.Printf("\nRunning postgres tests for driver: %s, caching enabled: %t \n", driverName, withStatementCaching)
 
 		func() {
-			var err error
-			db, err = sql.Open(driverName, dbconfig.PostgresConnectString)
+			sqlDB, err := sql.Open(driverName, getConnectionString())
 			if err != nil {
 				fmt.Println(err.Error())
 				panic("Failed to connect to test db")
 			}
-			defer db.Close()
+			db = stmtcache.New(sqlDB).SetCaching(withStatementCaching)
+			defer func(db *stmtcache.DB) {
+				err := db.Close()
+				if err != nil {
+					fmt.Printf("ERROR: Failed to close db connection, %v", err)
+				}
+			}(db)
 
-			ret := m.Run()
-
-			if ret != 0 {
-				os.Exit(ret)
+			for i := 0; i < runCount(withStatementCaching); i++ {
+				ret := m.Run()
+				if ret != 0 {
+					fmt.Printf("\nFAIL: Running postgres tests failed for driver: %s, caching enabled: %t \n", driverName, withStatementCaching)
+					os.Exit(ret)
+				}
 			}
 		}()
 	}
+
+}
+
+func runCount(stmtCaching bool) int {
+	if stmtCaching {
+		return 2
+	}
+
+	return 1
+}
+
+func getConnectionString() string {
+	if sourceIsCockroachDB() {
+		return dbconfig.CockroachConnectString
+	}
+
+	return dbconfig.PostgresConnectString
 }
 
 func setTestRoot() {
@@ -112,10 +154,4 @@ func isPgxDriver() bool {
 	}
 
 	return false
-}
-
-func beginTx(t *testing.T) *sql.Tx {
-	tx, err := db.Begin()
-	require.NoError(t, err)
-	return tx
 }

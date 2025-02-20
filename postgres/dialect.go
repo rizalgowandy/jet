@@ -1,8 +1,10 @@
 package postgres
 
 import (
-	"github.com/go-jet/jet/v2/internal/jet"
+	"fmt"
 	"strconv"
+
+	"github.com/go-jet/jet/v2/internal/jet"
 )
 
 // Dialect is implementation of postgres dialect for SQL Builder serialisation.
@@ -25,6 +27,9 @@ func newDialect() jet.Dialect {
 			return "$" + strconv.Itoa(ord)
 		},
 		ReservedWords: reservedWords,
+		ValuesDefaultColumnName: func(index int) string {
+			return fmt.Sprintf("column%d", index+1)
+		},
 	}
 
 	return jet.NewDialect(dialectParams)
@@ -117,17 +122,23 @@ var reservedWords = []string{
 	"AS",
 	"ASC",
 	"ASYMMETRIC",
+	"AUTHORIZATION",
+	"BINARY",
 	"BOTH",
 	"CASE",
 	"CAST",
 	"CHECK",
 	"COLLATE",
+	"COLLATION",
 	"COLUMN",
+	"CONCURRENTLY",
 	"CONSTRAINT",
 	"CREATE",
+	"CROSS",
 	"CURRENT_CATALOG",
 	"CURRENT_DATE",
 	"CURRENT_ROLE",
+	"CURRENT_SCHEMA",
 	"CURRENT_TIME",
 	"CURRENT_TIMESTAMP",
 	"CURRENT_USER",
@@ -143,35 +154,52 @@ var reservedWords = []string{
 	"FETCH",
 	"FOR",
 	"FOREIGN",
+	"FREEZE",
 	"FROM",
+	"FULL",
 	"GRANT",
 	"GROUP",
 	"HAVING",
+	"ILIKE",
 	"IN",
 	"INITIALLY",
+	"INNER",
 	"INTERSECT",
 	"INTO",
+	"IS",
+	"ISNULL",
+	"JOIN",
 	"LATERAL",
 	"LEADING",
+	"LEFT",
+	"LIKE",
 	"LIMIT",
 	"LOCALTIME",
 	"LOCALTIMESTAMP",
+	"NATURAL",
 	"NOT",
+	"NOTNULL",
 	"NULL",
 	"OFFSET",
 	"ON",
 	"ONLY",
 	"OR",
 	"ORDER",
+	"OUTER",
+	"OVERLAPS",
 	"PLACING",
 	"PRIMARY",
 	"REFERENCES",
 	"RETURNING",
+	"RIGHT",
 	"SELECT",
 	"SESSION_USER",
+	"SIMILAR",
 	"SOME",
 	"SYMMETRIC",
+	"SYSTEM_USER",
 	"TABLE",
+	"TABLESAMPLE",
 	"THEN",
 	"TO",
 	"TRAILING",
@@ -181,6 +209,7 @@ var reservedWords = []string{
 	"USER",
 	"USING",
 	"VARIADIC",
+	"VERBOSE",
 	"WHEN",
 	"WHERE",
 	"WINDOW",

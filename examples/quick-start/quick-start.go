@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"os"
 
 	_ "github.com/lib/pq"
 
@@ -46,8 +46,8 @@ func main() {
 			INNER_JOIN(FilmCategory, FilmCategory.FilmID.EQ(Film.FilmID)).
 			INNER_JOIN(Category, Category.CategoryID.EQ(FilmCategory.CategoryID)),
 	).WHERE(
-		Language.Name.EQ(String("English")).
-			AND(Category.Name.NOT_EQ(String("Action"))).
+		Language.Name.EQ(Char(20)("English")).
+			AND(Category.Name.NOT_EQ(Text("Action"))).
 			AND(Film.Length.GT(Int(180))),
 	).ORDER_BY(
 		Actor.ActorID.ASC(),
@@ -90,7 +90,7 @@ func main() {
 func jsonSave(path string, v interface{}) {
 	jsonText, _ := json.MarshalIndent(v, "", "\t")
 
-	err := ioutil.WriteFile(path, jsonText, 0644)
+	err := os.WriteFile(path, jsonText, 0600)
 
 	panicOnError(err)
 }

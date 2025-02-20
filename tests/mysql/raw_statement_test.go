@@ -84,7 +84,10 @@ func TestRawStatementSelectWithArguments(t *testing.T) {
 }
 
 func TestRawStatementRows(t *testing.T) {
-	stmt := RawStatement(`
+
+	var stmt Statement
+
+	stmt = RawStatement(`
 		SELECT actor.actor_id AS "actor.actor_id",
 			 actor.first_name AS "actor.first_name",
 			 actor.last_name AS "actor.last_name",
@@ -92,7 +95,10 @@ func TestRawStatementRows(t *testing.T) {
 		FROM dvds.actor
 		ORDER BY actor.actor_id`)
 
-	rows, err := stmt.Rows(context.Background(), db)
+	var rows *Rows
+	var err error
+
+	rows, err = stmt.Rows(context.Background(), db)
 	require.NoError(t, err)
 
 	for rows.Next() {

@@ -26,7 +26,7 @@ services:
       - ./testdata/init/mysql:/docker-entrypoint-initdb.d
 
   mariadb:
-    image: mariadb:10.3.32
+    image: mariadb:10.3
     command: ['--default-authentication-plugin=mysql_native_password', '--log_bin_trust_function_creators=1']
     restart: always
     environment:
@@ -37,3 +37,16 @@ services:
       - '50903:3306'
     volumes:
       - ./testdata/init/mysql:/docker-entrypoint-initdb.d
+
+  cockroach:
+    image: cockroachdb/cockroach-unstable:v23.1.0-rc.2
+    environment:
+      - COCKROACH_USER=jet
+      - COCKROACH_PASSWORD=jet
+      - COCKROACH_DATABASE=jetdb
+    ports:
+      - "26257:26257"
+    command: start-single-node --accept-sql-without-tls
+#    volumes:
+#      - ./testdata/init/cockroach:/docker-entrypoint-initdb.d
+

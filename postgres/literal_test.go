@@ -49,22 +49,31 @@ func TestUint32(t *testing.T) {
 	assertSerialize(t, Uint32(val), `$1::bigint`, val)
 }
 
-func TestUint64(t *testing.T) {
-	val := uint64(math.MaxUint64)
-	assertSerialize(t, Uint64(val), `$1::bigint`, val)
-}
-
 func TestFloat(t *testing.T) {
 	assertSerialize(t, Float(12.34), `$1`, float64(12.34))
+
+	assertSerialize(t, Real(12.34), `$1::real`, float32(12.34))
+	assertSerialize(t, Double(12.34), `$1::double precision`, float64(12.34))
 }
 
 func TestString(t *testing.T) {
-	assertSerialize(t, String("Some text"), `$1`, "Some text")
+	assertSerialize(t, String("Some text"), `$1::text`, "Some text")
+
+	assertSerialize(t, Text("Some text"), `$1::text`, "Some text")
+	assertSerialize(t, Char(20)("John Doe"), `$1::char(20)`, "John Doe")
+	assertSerialize(t, Char()("John Doe"), `$1::char`, "John Doe")
+	assertSerialize(t, VarChar(20)("John Doe"), `$1::varchar(20)`, "John Doe")
+	assertSerialize(t, VarChar()("John Doe"), `$1::varchar`, "John Doe")
 }
 
 func TestBytea(t *testing.T) {
 	assertSerialize(t, Bytea("Some text"), `$1::bytea`, "Some text")
 	assertSerialize(t, Bytea([]byte("Some byte array")), `$1::bytea`, []byte("Some byte array"))
+}
+
+func TestJson(t *testing.T) {
+	assertSerialize(t, Json("{\"key\": \"value\"}"), `$1::json`, "{\"key\": \"value\"}")
+	assertSerialize(t, Json([]byte("{\"key\": \"value\"}")), `$1::json`, []byte("{\"key\": \"value\"}"))
 }
 
 func TestDate(t *testing.T) {

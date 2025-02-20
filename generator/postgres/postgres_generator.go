@@ -4,13 +4,11 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
-	"path"
+	"path/filepath"
 	"strconv"
 
 	"github.com/go-jet/jet/v2/generator/metadata"
 	"github.com/go-jet/jet/v2/generator/template"
-	"github.com/go-jet/jet/v2/internal/utils"
-	"github.com/go-jet/jet/v2/internal/utils/throw"
 	"github.com/go-jet/jet/v2/postgres"
 	"github.com/jackc/pgconn"
 )
@@ -43,39 +41,56 @@ func Generate(destDir string, dbConn DBConnection, genTemplate ...template.Templ
 }
 
 // GenerateDSN generates jet files using dsn connection string
-func GenerateDSN(dsn, schema, destDir string, templates ...template.Template) (err error) {
-	defer utils.ErrorCatch(&err)
-
+func GenerateDSN(dsn, schema, destDir string, templates ...template.Template) error {
 	cfg, err := pgconn.ParseConfig(dsn)
-	throw.OnError(err)
-	if cfg.Database == "" {
-		panic("database name is required")
+	if err != nil {
+		return fmt.Errorf("failed to parse config: %w", err)
 	}
-	db := openConnection(dsn)
-	defer utils.DBClose(db)
+	if cfg.Database == "" {
+		return fmt.Errorf("database name is required")
+	}
+	db, err := openConnection(dsn)
+	if err != nil {
+		return fmt.Errorf("failed to open db connection: %w", err)
+	}
+	defer db.Close()
 
 	fmt.Println("Retrieving schema information...")
+	return GenerateDB(db, schema, filepath.Join(destDir, cfg.Database), templates...)
+}
+
+// GenerateDB generates jet files using the provided *sql.DB
+func GenerateDB(db *sql.DB, schema, destDir string, templates ...template.Template) error {
 	generatorTemplate := template.Default(postgres.Dialect)
 	if len(templates) > 0 {
 		generatorTemplate = templates[0]
 	}
 
-	schemaMetadata := metadata.GetSchema(db, &postgresQuerySet{}, schema)
+	schemaMetadata, err := metadata.GetSchema(db, &postgresQuerySet{}, schema)
+	if err != nil {
+		return fmt.Errorf("failed to get '%s' schema metadata: %w", schema, err)
+	}
 
-	dirPath := path.Join(destDir, cfg.Database)
+	err = template.ProcessSchema(destDir, schemaMetadata, generatorTemplate)
+	if err != nil {
+		return fmt.Errorf("failed to generate schema %s: %d", schemaMetadata.Name, err)
+	}
 
-	template.ProcessSchema(dirPath, schemaMetadata, generatorTemplate)
-	return
+	return nil
 }
 
-func openConnection(dsn string) *sql.DB {
-	fmt.Println("Connecting to postgres database: " + dsn)
+func openConnection(dsn string) (*sql.DB, error) {
+	fmt.Println("Connecting to postgres database...")
 
 	db, err := sql.Open("postgres", dsn)
-	throw.OnError(err)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open db connection: %w", err)
+	}
 
 	err = db.Ping()
-	throw.OnError(err)
+	if err != nil {
+		return nil, fmt.Errorf("failed to ping database: %w", err)
+	}
 
-	return db
+	return db, nil
 }

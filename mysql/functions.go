@@ -11,8 +11,10 @@ var (
 	OR = jet.OR
 )
 
-// ROW is construct one table row from list of expressions.
-var ROW = jet.ROW
+// ROW function is used to create a tuple value that consists of a set of expressions or column values.
+func ROW(expressions ...Expression) RowExpression {
+	return jet.ROW(Dialect, expressions...)
+}
 
 // ------------------ Mathematical functions ---------------//
 
@@ -222,7 +224,20 @@ var SUBSTR = jet.SUBSTR
 // REGEXP_LIKE Returns 1 if the string expr matches the regular expression specified by the pattern pat, 0 otherwise.
 var REGEXP_LIKE = jet.REGEXP_LIKE
 
+// UUID_TO_BIN is a helper function that calls "uuid_to_bin" function on the passed value.
+func UUID_TO_BIN(str StringExpression) StringExpression {
+	fn := Func("uuid_to_bin", str)
+	return StringExp(fn)
+}
+
 //----------------- Date/Time Functions and Operators ------------//
+
+// EXTRACT function retrieves subfields such as year or hour from date/time values
+//
+//	EXTRACT(DAY, User.CreatedAt)
+func EXTRACT(field unitType, from Expression) IntegerExpression {
+	return IntExp(jet.EXTRACT(string(field), from))
+}
 
 // CURRENT_DATE returns current date
 var CURRENT_DATE = jet.CURRENT_DATE
@@ -255,10 +270,34 @@ func UNIX_TIMESTAMP(str StringExpression) TimestampExpression {
 	return jet.NewTimestampFunc("UNIX_TIMESTAMP", str)
 }
 
-//----------- Comparison operators ---------------//
+// --------------- Conditional Expressions Functions -------------//
 
 // EXISTS checks for existence of the rows in subQuery
 var EXISTS = jet.EXISTS
 
 // CASE create CASE operator with optional list of expressions
 var CASE = jet.CASE
+
+// COALESCE function returns the first of its arguments that is not null.
+var COALESCE = jet.COALESCE
+
+// NULLIF function returns a null value if value1 equals value2; otherwise it returns value1.
+var NULLIF = jet.NULLIF
+
+// GREATEST selects the largest value from a list of expressions, or null if any of the expressions is null.
+var GREATEST = jet.GREATEST
+
+// LEAST selects the smallest value from a list of expressions, or null if any of the expressions is null.
+var LEAST = jet.LEAST
+
+// ----------------------- Group By operators ----------------------------//
+
+// WITH_ROLLUP operator is used with the GROUP BY clause to generate all prefixes of a group of columns including the empty list.
+// It creates extra rows in the result set that represent the subtotal values for each combination of columns.
+var WITH_ROLLUP = jet.WITH_ROLLUP
+
+// GROUPING function is used to identify which columns are included in a grouping set or a subtotal row. It takes as input
+// the name of a column and returns 1 if the column is not included in the current grouping set, and 0 otherwise.
+// It can be also used with multiple parameters to check if a set of columns is included in the current grouping set. The result
+// of the GROUPING function would then be an integer bit mask having 1’s for the arguments which have GROUPING(argument) as 1.
+var GROUPING = jet.GROUPING

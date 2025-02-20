@@ -40,6 +40,8 @@ type SelectStatement interface {
 	jet.HasProjections
 	Expression
 
+	OPTIMIZER_HINTS(hints ...OptimizerHint) SelectStatement
+
 	DISTINCT() SelectStatement
 	FROM(tables ...ReadableTable) SelectStatement
 	WHERE(expression BoolExpression) SelectStatement
@@ -65,16 +67,25 @@ func SELECT(projection Projection, projections ...Projection) SelectStatement {
 
 func newSelectStatement(table ReadableTable, projections []Projection) SelectStatement {
 	newSelect := &selectStatementImpl{}
-	newSelect.ExpressionStatement = jet.NewExpressionStatementImpl(Dialect, jet.SelectStatementType, newSelect, &newSelect.Select,
-		&newSelect.From, &newSelect.Where, &newSelect.GroupBy, &newSelect.Having, &newSelect.Window, &newSelect.OrderBy,
-		&newSelect.Limit, &newSelect.Offset, &newSelect.For, &newSelect.ShareLock)
+	newSelect.ExpressionStatement = jet.NewExpressionStatementImpl(Dialect, jet.SelectStatementType, newSelect,
+		&newSelect.Select,
+		&newSelect.From,
+		&newSelect.Where,
+		&newSelect.GroupBy,
+		&newSelect.Having,
+		&newSelect.Window,
+		&newSelect.OrderBy,
+		&newSelect.Limit,
+		&newSelect.Offset,
+		&newSelect.For,
+		&newSelect.ShareLock,
+	)
 
 	newSelect.Select.ProjectionList = projections
 	if table != nil {
 		newSelect.From.Tables = []jet.Serializer{table}
 	}
 	newSelect.Limit.Count = -1
-	newSelect.Offset.Count = -1
 	newSelect.ShareLock.Name = "LOCK IN SHARE MODE"
 	newSelect.ShareLock.InNewLine = true
 
@@ -98,6 +109,11 @@ type selectStatementImpl struct {
 	Offset    jet.ClauseOffset
 	For       jet.ClauseFor
 	ShareLock jet.ClauseOptional
+}
+
+func (s *selectStatementImpl) OPTIMIZER_HINTS(hints ...OptimizerHint) SelectStatement {
+	s.Select.OptimizerHints = hints
+	return s
 }
 
 func (s *selectStatementImpl) DISTINCT() SelectStatement {
@@ -141,7 +157,7 @@ func (s *selectStatementImpl) LIMIT(limit int64) SelectStatement {
 }
 
 func (s *selectStatementImpl) OFFSET(offset int64) SelectStatement {
-	s.Offset.Count = offset
+	s.Offset.Count = Int(offset)
 	return s
 }
 
@@ -156,7 +172,7 @@ func (s *selectStatementImpl) LOCK_IN_SHARE_MODE() SelectStatement {
 }
 
 func (s *selectStatementImpl) AsTable(alias string) SelectTable {
-	return newSelectTable(s, alias)
+	return newSelectTable(s, alias, nil)
 }
 
 //-----------------------------------------------------

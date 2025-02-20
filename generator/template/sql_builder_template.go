@@ -3,8 +3,9 @@ package template
 import (
 	"fmt"
 	"github.com/go-jet/jet/v2/generator/metadata"
-	"github.com/go-jet/jet/v2/internal/utils"
-	"path"
+	"github.com/go-jet/jet/v2/internal/utils/dbidentifier"
+	"path/filepath"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -59,6 +60,7 @@ type TableSQLBuilder struct {
 	FileName     string
 	InstanceName string
 	TypeName     string
+	DefaultAlias string
 	Column       func(columnMetaData metadata.Column) TableSQLBuilderColumn
 }
 
@@ -67,11 +69,14 @@ type ViewSQLBuilder = TableSQLBuilder
 
 // DefaultTableSQLBuilder returns default implementation for TableSQLBuilder
 func DefaultTableSQLBuilder(tableMetaData metadata.Table) TableSQLBuilder {
+	tableNameGoIdentifier := dbidentifier.ToGoIdentifier(tableMetaData.Name)
+
 	return TableSQLBuilder{
 		Path:         "/table",
-		FileName:     utils.ToGoFileName(tableMetaData.Name),
-		InstanceName: utils.ToGoIdentifier(tableMetaData.Name),
-		TypeName:     utils.ToGoIdentifier(tableMetaData.Name) + "Table",
+		FileName:     dbidentifier.ToGoFileName(tableMetaData.Name),
+		InstanceName: tableNameGoIdentifier,
+		TypeName:     tableNameGoIdentifier + "Table",
+		DefaultAlias: "",
 		Column:       DefaultTableSQLBuilderColumn,
 	}
 }
@@ -85,7 +90,7 @@ func DefaultViewSQLBuilder(viewMetaData metadata.Table) ViewSQLBuilder {
 
 // PackageName returns package name of table sql builder types
 func (tb TableSQLBuilder) PackageName() string {
-	return path.Base(tb.Path)
+	return filepath.Base(tb.Path)
 }
 
 // UsePath returns new TableSQLBuilder with new relative path set
@@ -112,6 +117,12 @@ func (tb TableSQLBuilder) UseTypeName(name string) TableSQLBuilder {
 	return tb
 }
 
+// UseDefaultAlias returns new TableSQLBuilder with new default alias set
+func (tb TableSQLBuilder) UseDefaultAlias(defaultAlias string) TableSQLBuilder {
+	tb.DefaultAlias = defaultAlias
+	return tb
+}
+
 // UseColumn returns new TableSQLBuilder with new column template function set
 func (tb TableSQLBuilder) UseColumn(columnsFunc func(column metadata.Column) TableSQLBuilderColumn) TableSQLBuilder {
 	tb.Column = columnsFunc
@@ -120,28 +131,39 @@ func (tb TableSQLBuilder) UseColumn(columnsFunc func(column metadata.Column) Tab
 
 // TableSQLBuilderColumn is template for table sql builder column
 type TableSQLBuilderColumn struct {
+	Skip bool
 	Name string
 	Type string
+}
+
+var reservedKeywords = []string{"TableName", "Table", "SchemaName", "Alias", "AllColumns", "MutableColumns", "DefaultColumns"}
+
+func renameIfReserved(name string) string {
+	if slices.Contains(reservedKeywords, name) {
+		return name + "_"
+	}
+	return name
 }
 
 // DefaultTableSQLBuilderColumn returns default implementation of TableSQLBuilderColumn
 func DefaultTableSQLBuilderColumn(columnMetaData metadata.Column) TableSQLBuilderColumn {
 	return TableSQLBuilderColumn{
-		Name: utils.ToGoIdentifier(columnMetaData.Name),
+		Name: renameIfReserved(dbidentifier.ToGoIdentifier(columnMetaData.Name)),
 		Type: getSqlBuilderColumnType(columnMetaData),
 	}
 }
 
 // getSqlBuilderColumnType returns type of jet sql builder column
 func getSqlBuilderColumnType(columnMetaData metadata.Column) string {
-	if columnMetaData.DataType.Kind != metadata.BaseType {
+	if columnMetaData.DataType.Kind != metadata.BaseType &&
+		columnMetaData.DataType.Kind != metadata.RangeType {
 		return "String"
 	}
 
 	switch strings.ToLower(columnMetaData.DataType.Name) {
-	case "boolean":
+	case "boolean", "bool":
 		return "Bool"
-	case "smallint", "integer", "bigint",
+	case "smallint", "integer", "bigint", "int2", "int4", "int8",
 		"tinyint", "mediumint", "int", "year": //MySQL
 		return "Integer"
 	case "date":
@@ -149,23 +171,35 @@ func getSqlBuilderColumnType(columnMetaData metadata.Column) string {
 	case "timestamp without time zone",
 		"timestamp", "datetime": //MySQL:
 		return "Timestamp"
-	case "timestamp with time zone":
+	case "timestamp with time zone", "timestamptz":
 		return "Timestampz"
 	case "time without time zone",
 		"time": //MySQL
 		return "Time"
-	case "time with time zone":
+	case "time with time zone", "timetz":
 		return "Timez"
 	case "interval":
 		return "Interval"
 	case "user-defined", "enum", "text", "character", "character varying", "bytea", "uuid",
 		"tsvector", "bit", "bit varying", "money", "json", "jsonb", "xml", "point", "line", "ARRAY",
-		"char", "varchar", "nvarchar", "binary", "varbinary",
+		"char", "varchar", "nvarchar", "binary", "varbinary", "bpchar", "varbit",
 		"tinyblob", "blob", "mediumblob", "longblob", "tinytext", "mediumtext", "longtext": // MySQL
 		return "String"
-	case "real", "numeric", "decimal", "double precision", "float",
+	case "real", "numeric", "decimal", "double precision", "float", "float4", "float8",
 		"double": // MySQL
 		return "Float"
+	case "daterange":
+		return "DateRange"
+	case "tsrange":
+		return "TimestampRange"
+	case "tstzrange":
+		return "TimestampzRange"
+	case "int4range":
+		return "Int4Range"
+	case "int8range":
+		return "Int8Range"
+	case "numrange":
+		return "NumericRange"
 	default:
 		fmt.Println("- [SQL Builder] Unsupported sql column '" + columnMetaData.Name + " " + columnMetaData.DataType.Name + "', using StringColumn instead.")
 		return "String"
@@ -185,8 +219,8 @@ type EnumSQLBuilder struct {
 func DefaultEnumSQLBuilder(enumMetaData metadata.Enum) EnumSQLBuilder {
 	return EnumSQLBuilder{
 		Path:         "/enum",
-		FileName:     utils.ToGoFileName(enumMetaData.Name),
-		InstanceName: utils.ToGoIdentifier(enumMetaData.Name),
+		FileName:     dbidentifier.ToGoFileName(enumMetaData.Name),
+		InstanceName: dbidentifier.ToGoIdentifier(enumMetaData.Name),
 		ValueName: func(enumValue string) string {
 			return defaultEnumValueName(enumMetaData.Name, enumValue)
 		},
@@ -195,7 +229,7 @@ func DefaultEnumSQLBuilder(enumMetaData metadata.Enum) EnumSQLBuilder {
 
 // PackageName returns enum sql builder package name
 func (e EnumSQLBuilder) PackageName() string {
-	return path.Base(e.Path)
+	return filepath.Base(e.Path)
 }
 
 // UsePath returns new EnumSQLBuilder with new path set
@@ -217,9 +251,9 @@ func (e EnumSQLBuilder) UseInstanceName(name string) EnumSQLBuilder {
 }
 
 func defaultEnumValueName(enumName, enumValue string) string {
-	enumValueName := utils.ToGoIdentifier(enumValue)
+	enumValueName := dbidentifier.ToGoIdentifier(enumValue)
 	if !unicode.IsLetter([]rune(enumValueName)[0]) {
-		return utils.ToGoIdentifier(enumName) + enumValueName
+		return dbidentifier.ToGoIdentifier(enumName) + enumValueName
 	}
 
 	return enumValueName

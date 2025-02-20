@@ -1,16 +1,20 @@
 package sqlite
 
 import (
-	"github.com/go-jet/jet/v2/generator/sqlite"
-	"github.com/go-jet/jet/v2/internal/testutils"
-	"github.com/go-jet/jet/v2/tests/.gentestdata/sqlite/sakila/model"
-	"github.com/go-jet/jet/v2/tests/internal/utils/repo"
-	"github.com/stretchr/testify/require"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/go-jet/jet/v2/generator/metadata"
+	"github.com/go-jet/jet/v2/generator/sqlite"
+	"github.com/go-jet/jet/v2/generator/template"
+	"github.com/go-jet/jet/v2/internal/testutils"
+	sqlite2 "github.com/go-jet/jet/v2/sqlite"
+	"github.com/go-jet/jet/v2/tests/.gentestdata/sqlite/sakila/model"
+	"github.com/go-jet/jet/v2/tests/internal/utils/repo"
 )
 
 func TestGeneratedModel(t *testing.T) {
@@ -57,6 +61,36 @@ func TestGenerator(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestGenerator_TableMetadata(t *testing.T) {
+	var schema metadata.Schema
+	err := sqlite.GenerateDSN(testDatabaseFilePath, genDestDir,
+		template.Default(sqlite2.Dialect).UseSchema(func(m metadata.Schema) template.Schema {
+			schema = m
+			return template.DefaultSchema(m)
+		}))
+	require.NoError(t, err)
+
+	// Spot check the actor table and assert that the emitted
+	// properties are as expected.
+	var got metadata.Table
+	for _, table := range schema.TablesMetaData {
+		if table.Name == "actor" {
+			got = table
+		}
+	}
+
+	want := metadata.Table{
+		Name: "actor",
+		Columns: []metadata.Column{
+			{Name: "actor_id", IsPrimaryKey: true, IsNullable: false, IsGenerated: false, HasDefault: false, DataType: metadata.DataType{Name: "INTEGER", Kind: "base", IsUnsigned: false}, Comment: ""},
+			{Name: "first_name", IsPrimaryKey: false, IsNullable: false, IsGenerated: false, HasDefault: false, DataType: metadata.DataType{Name: "VARCHAR", Kind: "base", IsUnsigned: false}, Comment: ""},
+			{Name: "last_name", IsPrimaryKey: false, IsNullable: false, IsGenerated: false, HasDefault: false, DataType: metadata.DataType{Name: "VARCHAR", Kind: "base", IsUnsigned: false}, Comment: ""},
+			{Name: "last_update", IsPrimaryKey: false, IsNullable: false, IsGenerated: false, HasDefault: true, DataType: metadata.DataType{Name: "TIMESTAMP", Kind: "base", IsUnsigned: false}, Comment: ""},
+		},
+	}
+	require.Equal(t, want, got)
+}
+
 func TestCmdGenerator(t *testing.T) {
 	cmd := exec.Command("jet", "-source=SQLite", "-dsn=file://"+testDatabaseFilePath, "-path="+genDestDir)
 
@@ -86,50 +120,36 @@ func TestCmdGeneratorIgnoreTablesViewsEnums(t *testing.T) {
 	err := cmd.Run()
 	require.NoError(t, err)
 
-	tableSQLBuilderFiles, err := ioutil.ReadDir(genDestDir + "/table")
-	require.NoError(t, err)
-	testutils.AssertFileNamesEqual(t, tableSQLBuilderFiles, "country.go",
+	testutils.AssertFileNamesEqual(t, genDestDir+"/table", "country.go",
 		"customer.go", "film_actor.go", "film_category.go", "film_text.go", "inventory.go", "language.go",
-		"payment.go", "staff.go")
+		"payment.go", "staff.go", "table_use_schema.go")
 
-	viewSQLBuilderFiles, err := ioutil.ReadDir(genDestDir + "/view")
-	require.NoError(t, err)
-	testutils.AssertFileNamesEqual(t, viewSQLBuilderFiles, "sales_by_film_category.go",
-		"sales_by_store.go")
+	testutils.AssertFileNamesEqual(t, genDestDir+"/view", "sales_by_film_category.go",
+		"sales_by_store.go", "view_use_schema.go")
 
-	modelFiles, err := ioutil.ReadDir(genDestDir + "/model")
-	require.NoError(t, err)
-
-	testutils.AssertFileNamesEqual(t, modelFiles, "country.go",
+	testutils.AssertFileNamesEqual(t, genDestDir+"/model", "country.go",
 		"customer.go", "film_actor.go", "film_category.go", "film_text.go", "inventory.go", "language.go",
 		"payment.go", "staff.go", "sales_by_film_category.go", "sales_by_store.go")
 }
 
 func assertGeneratedFiles(t *testing.T) {
 	// Table SQL Builder files
-	tableSQLBuilderFiles, err := ioutil.ReadDir(genDestDir + "/table")
-	require.NoError(t, err)
-
-	testutils.AssertFileNamesEqual(t, tableSQLBuilderFiles, "actor.go", "address.go", "category.go", "city.go", "country.go",
+	testutils.AssertFileNamesEqual(t, genDestDir+"/table", "actor.go", "address.go", "category.go", "city.go", "country.go",
 		"customer.go", "film.go", "film_actor.go", "film_category.go", "film_text.go", "inventory.go", "language.go",
-		"payment.go", "rental.go", "staff.go", "store.go")
+		"payment.go", "rental.go", "staff.go", "store.go", "table_use_schema.go")
 
 	testutils.AssertFileContent(t, genDestDir+"/table/actor.go", actorSQLBuilderFile)
+	testutils.AssertFileContent(t, genDestDir+"/table/table_use_schema.go", tableUseSchemaFile)
 
 	// View SQL Builder files
-	viewSQLBuilderFiles, err := ioutil.ReadDir(genDestDir + "/view")
-	require.NoError(t, err)
-
-	testutils.AssertFileNamesEqual(t, viewSQLBuilderFiles, "film_list.go", "sales_by_film_category.go",
-		"customer_list.go", "sales_by_store.go", "staff_list.go")
+	testutils.AssertFileNamesEqual(t, genDestDir+"/view", "film_list.go", "sales_by_film_category.go",
+		"customer_list.go", "sales_by_store.go", "staff_list.go", "view_use_schema.go")
 
 	testutils.AssertFileContent(t, genDestDir+"/view/film_list.go", filmListSQLBuilderFile)
+	testutils.AssertFileContent(t, genDestDir+"/view/view_use_schema.go", viewUseSchemaFile)
 
 	// Model files
-	modelFiles, err := ioutil.ReadDir(genDestDir + "/model")
-	require.NoError(t, err)
-
-	testutils.AssertFileNamesEqual(t, modelFiles, "actor.go", "address.go", "category.go", "city.go", "country.go",
+	testutils.AssertFileNamesEqual(t, genDestDir+"/model", "actor.go", "address.go", "category.go", "city.go", "country.go",
 		"customer.go", "film.go", "film_actor.go", "film_category.go", "film_text.go", "inventory.go", "language.go",
 		"payment.go", "rental.go", "staff.go", "store.go",
 		"film_list.go", "sales_by_film_category.go",
@@ -157,7 +177,7 @@ var Actor = newActorTable("", "actor", "")
 type actorTable struct {
 	sqlite.Table
 
-	//Columns
+	// Columns
 	ActorID    sqlite.ColumnInteger
 	FirstName  sqlite.ColumnString
 	LastName   sqlite.ColumnString
@@ -165,6 +185,7 @@ type actorTable struct {
 
 	AllColumns     sqlite.ColumnList
 	MutableColumns sqlite.ColumnList
+	DefaultColumns sqlite.ColumnList
 }
 
 type ActorTable struct {
@@ -183,6 +204,16 @@ func (a ActorTable) FromSchema(schemaName string) *ActorTable {
 	return newActorTable(schemaName, a.TableName(), a.Alias())
 }
 
+// WithPrefix creates new ActorTable with assigned table prefix
+func (a ActorTable) WithPrefix(prefix string) *ActorTable {
+	return newActorTable(a.SchemaName(), prefix+a.TableName(), a.TableName())
+}
+
+// WithSuffix creates new ActorTable with assigned table suffix
+func (a ActorTable) WithSuffix(suffix string) *ActorTable {
+	return newActorTable(a.SchemaName(), a.TableName()+suffix, a.TableName())
+}
+
 func newActorTable(schemaName, tableName, alias string) *ActorTable {
 	return &ActorTable{
 		actorTable: newActorTableImpl(schemaName, tableName, alias),
@@ -198,6 +229,7 @@ func newActorTableImpl(schemaName, tableName, alias string) actorTable {
 		LastUpdateColumn = sqlite.TimestampColumn("last_update")
 		allColumns       = sqlite.ColumnList{ActorIDColumn, FirstNameColumn, LastNameColumn, LastUpdateColumn}
 		mutableColumns   = sqlite.ColumnList{FirstNameColumn, LastNameColumn, LastUpdateColumn}
+		defaultColumns   = sqlite.ColumnList{LastUpdateColumn}
 	)
 
 	return actorTable{
@@ -211,7 +243,39 @@ func newActorTableImpl(schemaName, tableName, alias string) actorTable {
 
 		AllColumns:     allColumns,
 		MutableColumns: mutableColumns,
+		DefaultColumns: defaultColumns,
 	}
+}
+`
+const tableUseSchemaFile = `
+//
+// Code generated by go-jet DO NOT EDIT.
+//
+// WARNING: Changes to this file may cause incorrect behavior
+// and will be lost if the code is regenerated
+//
+
+package table
+
+// UseSchema sets a new schema name for all generated table SQL builder types. It is recommended to invoke
+// this method only once at the beginning of the program.
+func UseSchema(schema string) {
+	Actor = Actor.FromSchema(schema)
+	Address = Address.FromSchema(schema)
+	Category = Category.FromSchema(schema)
+	City = City.FromSchema(schema)
+	Country = Country.FromSchema(schema)
+	Customer = Customer.FromSchema(schema)
+	Film = Film.FromSchema(schema)
+	FilmActor = FilmActor.FromSchema(schema)
+	FilmCategory = FilmCategory.FromSchema(schema)
+	FilmText = FilmText.FromSchema(schema)
+	Inventory = Inventory.FromSchema(schema)
+	Language = Language.FromSchema(schema)
+	Payment = Payment.FromSchema(schema)
+	Rental = Rental.FromSchema(schema)
+	Staff = Staff.FromSchema(schema)
+	Store = Store.FromSchema(schema)
 }
 `
 
@@ -234,7 +298,7 @@ var FilmList = newFilmListTable("", "film_list", "")
 type filmListTable struct {
 	sqlite.Table
 
-	//Columns
+	// Columns
 	Fid         sqlite.ColumnInteger
 	Title       sqlite.ColumnString
 	Description sqlite.ColumnString
@@ -246,6 +310,7 @@ type filmListTable struct {
 
 	AllColumns     sqlite.ColumnList
 	MutableColumns sqlite.ColumnList
+	DefaultColumns sqlite.ColumnList
 }
 
 type FilmListTable struct {
@@ -262,6 +327,16 @@ func (a FilmListTable) AS(alias string) *FilmListTable {
 // Schema creates new FilmListTable with assigned schema name
 func (a FilmListTable) FromSchema(schemaName string) *FilmListTable {
 	return newFilmListTable(schemaName, a.TableName(), a.Alias())
+}
+
+// WithPrefix creates new FilmListTable with assigned table prefix
+func (a FilmListTable) WithPrefix(prefix string) *FilmListTable {
+	return newFilmListTable(a.SchemaName(), prefix+a.TableName(), a.TableName())
+}
+
+// WithSuffix creates new FilmListTable with assigned table suffix
+func (a FilmListTable) WithSuffix(suffix string) *FilmListTable {
+	return newFilmListTable(a.SchemaName(), a.TableName()+suffix, a.TableName())
 }
 
 func newFilmListTable(schemaName, tableName, alias string) *FilmListTable {
@@ -283,6 +358,7 @@ func newFilmListTableImpl(schemaName, tableName, alias string) filmListTable {
 		ActorsColumn      = sqlite.StringColumn("actors")
 		allColumns        = sqlite.ColumnList{FidColumn, TitleColumn, DescriptionColumn, CategoryColumn, PriceColumn, LengthColumn, RatingColumn, ActorsColumn}
 		mutableColumns    = sqlite.ColumnList{FidColumn, TitleColumn, DescriptionColumn, CategoryColumn, PriceColumn, LengthColumn, RatingColumn, ActorsColumn}
+		defaultColumns    = sqlite.ColumnList{}
 	)
 
 	return filmListTable{
@@ -300,7 +376,29 @@ func newFilmListTableImpl(schemaName, tableName, alias string) filmListTable {
 
 		AllColumns:     allColumns,
 		MutableColumns: mutableColumns,
+		DefaultColumns: defaultColumns,
 	}
+}
+`
+
+const viewUseSchemaFile = `
+//
+// Code generated by go-jet DO NOT EDIT.
+//
+// WARNING: Changes to this file may cause incorrect behavior
+// and will be lost if the code is regenerated
+//
+
+package view
+
+// UseSchema sets a new schema name for all generated view SQL builder types. It is recommended to invoke
+// this method only once at the beginning of the program.
+func UseSchema(schema string) {
+	CustomerList = CustomerList.FromSchema(schema)
+	FilmList = FilmList.FromSchema(schema)
+	SalesByFilmCategory = SalesByFilmCategory.FromSchema(schema)
+	SalesByStore = SalesByStore.FromSchema(schema)
+	StaffList = StaffList.FromSchema(schema)
 }
 `
 

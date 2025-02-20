@@ -57,10 +57,13 @@ func TestRawInvalidArguments(t *testing.T) {
 }
 
 func TestRawHelperMethods(t *testing.T) {
+	assertSerialize(t, RawBool("table.colInt < :float", RawArgs{":float": 11.22}).IS_FALSE(),
+		"(table.colInt < $1) IS FALSE", 11.22)
+
 	assertSerialize(t, RawFloat("table.colInt + :float", RawArgs{":float": 11.22}).EQ(Float(3.14)),
 		"((table.colInt + $1) = $2)", 11.22, 3.14)
 	assertSerialize(t, RawString("table.colStr || str", RawArgs{"str": "doe"}).EQ(String("john doe")),
-		"((table.colStr || $1) = $2)", "doe", "john doe")
+		"((table.colStr || $1) = $2::text)", "doe", "john doe")
 
 	now := time.Now()
 	assertSerialize(t, RawTime("table.colTime").EQ(TimeT(now)),

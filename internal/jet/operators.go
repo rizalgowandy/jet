@@ -69,6 +69,16 @@ func GtEq(lhs, rhs Expression) BoolExpression {
 	return newBinaryBoolOperatorExpression(lhs, rhs, ">=")
 }
 
+// Contains returns a representation of "a @> b"
+func Contains(lhs Expression, rhs Expression) BoolExpression {
+	return newBinaryBoolOperatorExpression(lhs, rhs, "@>")
+}
+
+// Overlap returns a representation of "a && b"
+func Overlap(lhs, rhs Expression) BoolExpression {
+	return newBinaryBoolOperatorExpression(lhs, rhs, "&&")
+}
+
 // Add notEq returns a representation of "a + b"
 func Add(lhs, rhs Serializer) Expression {
 	return NewBinaryOperatorExpression(lhs, rhs, "+")
@@ -177,4 +187,8 @@ func (c *caseOperatorImpl) serialize(statement StatementType, out *SQLBuilder, o
 // DISTINCT operator can be used to return distinct values of expr
 func DISTINCT(expr Expression) Expression {
 	return newPrefixOperatorExpression(expr, "DISTINCT")
+}
+
+func BinaryOperator(lhs Expression, rhs Expression, operator string) Expression {
+	return NewBinaryOperatorExpression(lhs, rhs, operator)
 }

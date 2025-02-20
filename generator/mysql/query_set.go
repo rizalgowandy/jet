@@ -3,63 +3,62 @@ package mysql
 import (
 	"context"
 	"database/sql"
-	"github.com/go-jet/jet/v2/generator/metadata"
-	"github.com/go-jet/jet/v2/internal/utils/throw"
-	"github.com/go-jet/jet/v2/qrm"
+	"fmt"
 	"strings"
+
+	"github.com/go-jet/jet/v2/generator/metadata"
+	"github.com/go-jet/jet/v2/qrm"
 )
 
 // mySqlQuerySet is dialect query set for MySQL
 type mySqlQuerySet struct{}
 
-func (m mySqlQuerySet) GetTablesMetaData(db *sql.DB, schemaName string, tableType metadata.TableType) []metadata.Table {
+func (m mySqlQuerySet) GetTablesMetaData(db *sql.DB, schemaName string, tableType metadata.TableType) ([]metadata.Table, error) {
 	query := `
-SELECT table_name as "table.name"
-FROM INFORMATION_SCHEMA.tables
-WHERE table_schema = ? and table_type = ?;
-`
+SELECT
+		t.table_name as "table.name",
+		col.COLUMN_NAME AS "column.Name",
+		col.COLUMN_DEFAULT IS NOT NULL AND t.table_type != 'VIEW' as "column.HasDefault",
+		col.IS_NULLABLE = "YES" AS "column.IsNullable",
+		col.COLUMN_COMMENT AS "column.Comment",
+		COALESCE(pk.IsPrimaryKey, 0) AS "column.IsPrimaryKey",
+		IF (col.COLUMN_TYPE = 'tinyint(1)',
+				'boolean',
+				IF (col.DATA_TYPE = 'enum',
+						CONCAT(col.TABLE_NAME, '_', col.COLUMN_NAME),
+						col.DATA_TYPE)
+		) AS "dataType.Name",
+		IF (col.DATA_TYPE = 'enum', 'enum', 'base') AS "dataType.Kind",
+		col.COLUMN_TYPE LIKE '%unsigned%' AS "dataType.IsUnsigned"
+FROM INFORMATION_SCHEMA.tables AS t
+INNER JOIN
+		information_schema.columns AS col
+		ON t.table_schema = col.table_schema AND t.table_name = col.table_name
+LEFT JOIN (
+		SELECT k.column_name, 1 AS IsPrimaryKey, k.table_name
+		FROM information_schema.table_constraints t
+		JOIN information_schema.key_column_usage k USING(constraint_name, table_schema, table_name)
+		WHERE t.table_schema =  ?
+			AND t.constraint_type = 'PRIMARY KEY'
+) AS pk ON col.COLUMN_NAME = pk.column_name AND col.table_name = pk.table_name 
+WHERE t.table_schema = ?
+	AND t.table_type = ?
+ORDER BY
+		t.table_name,
+		col.ordinal_position;
+	`
+
 	var tables []metadata.Table
 
-	_, err := qrm.Query(context.Background(), db, query, []interface{}{schemaName, tableType}, &tables)
-	throw.OnError(err)
-
-	for i := range tables {
-		tables[i].Columns = m.GetTableColumnsMetaData(db, schemaName, tables[i].Name)
+	_, err := qrm.Query(context.Background(), db, query, []interface{}{schemaName, schemaName, tableType}, &tables)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query column meta data: %w", err)
 	}
 
-	return tables
+	return tables, nil
 }
 
-func (m mySqlQuerySet) GetTableColumnsMetaData(db *sql.DB, schemaName string, tableName string) []metadata.Column {
-	query := `
-SELECT COLUMN_NAME AS "column.Name", 
-	IS_NULLABLE = "YES" AS "column.IsNullable", 
-	(EXISTS(
-		SELECT 1
-		FROM information_schema.table_constraints t
-			JOIN information_schema.key_column_usage k USING(constraint_name,table_schema,table_name)
-		WHERE table_schema = ? AND table_name = ? AND t.constraint_type='PRIMARY KEY' AND k.column_name = columns.column_name
-	)) AS "column.IsPrimaryKey",
-	IF (COLUMN_TYPE = 'tinyint(1)', 
-			'boolean', 
-			IF (DATA_TYPE='enum', 
-					CONCAT(TABLE_NAME, '_', COLUMN_NAME), 
-					DATA_TYPE)
-	) AS "dataType.Name", 
-	IF (DATA_TYPE = 'enum', 'enum', 'base') AS "dataType.Kind", 
-	COLUMN_TYPE LIKE '%unsigned%' AS "dataType.IsUnsigned"
-FROM information_schema.columns
-WHERE table_schema = ? AND table_name = ?
-ORDER BY ordinal_position;
-`
-	var columns []metadata.Column
-	_, err := qrm.Query(context.Background(), db, query, []interface{}{schemaName, tableName, schemaName, tableName}, &columns)
-	throw.OnError(err)
-
-	return columns
-}
-
-func (m *mySqlQuerySet) GetEnumsMetaData(db *sql.DB, schemaName string) []metadata.Enum {
+func (m mySqlQuerySet) GetEnumsMetaData(db *sql.DB, schemaName string) ([]metadata.Enum, error) {
 	query := `
 SELECT (CASE c.DATA_TYPE WHEN 'enum' then CONCAT(c.TABLE_NAME, '_', c.COLUMN_NAME) ELSE '' END ) as "name", 
        SUBSTRING(c.COLUMN_TYPE,5) as "values"
@@ -73,7 +72,9 @@ WHERE c.table_schema = ? AND DATA_TYPE = 'enum';
 	}
 
 	_, err := qrm.Query(context.Background(), db, query, []interface{}{schemaName}, &queryResult)
-	throw.OnError(err)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query enums meta data: %w", err)
+	}
 
 	var ret []metadata.Enum
 
@@ -86,5 +87,5 @@ WHERE c.table_schema = ? AND DATA_TYPE = 'enum';
 		})
 	}
 
-	return ret
+	return ret, nil
 }

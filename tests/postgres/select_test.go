@@ -1,8 +1,14 @@
 package postgres
 
 import (
+	"context"
+	"database/sql"
+	"github.com/go-jet/jet/v2/internal/utils/ptr"
 	"testing"
 	"time"
+
+	"github.com/go-jet/jet/v2/qrm"
+	"gopkg.in/guregu/null.v4"
 
 	"github.com/stretchr/testify/require"
 
@@ -24,9 +30,9 @@ FROM dvds.actor
 WHERE actor.actor_id = 2;
 `
 
-	query := Actor.
-		SELECT(Actor.AllColumns).
+	query := SELECT(Actor.AllColumns).
 		DISTINCT().
+		FROM(Actor).
 		WHERE(Actor.ActorID.EQ(Int(2)))
 
 	testutils.AssertDebugStatementSql(t, query, expectedSQL, int64(2))
@@ -44,7 +50,6 @@ WHERE actor.actor_id = 2;
 	}
 
 	testutils.AssertDeepEqual(t, actor, expectedActor)
-
 	requireLogged(t, query)
 }
 
@@ -105,7 +110,7 @@ ORDER BY rental.staff_id ASC, rental.customer_id ASC, rental.rental_id ASC;
 `)
 }
 
-func TestClassicSelect(t *testing.T) {
+func TestSelectClassic(t *testing.T) {
 	expectedSQL := `
 SELECT payment.payment_id AS "payment.payment_id",
      payment.customer_id AS "payment.customer_id",
@@ -141,7 +146,7 @@ LIMIT 30;
 
 	testutils.AssertDebugStatementSql(t, query, expectedSQL, int64(30))
 
-	dest := []model.Payment{}
+	var dest []model.Payment
 
 	err := query.Query(db, &dest)
 
@@ -166,7 +171,7 @@ SELECT customer.customer_id AS "customer.customer_id",
 FROM dvds.customer
 ORDER BY customer.customer_id ASC;
 `
-	customers := []model.Customer{}
+	var customers []model.Customer
 
 	query := Customer.SELECT(Customer.AllColumns).ORDER_BY(Customer.CustomerID.ASC())
 
@@ -227,12 +232,128 @@ LIMIT 12;
 
 	testutils.AssertDebugStatementSql(t, query, expectedSQL, int64(1), int64(1), int64(10), int64(1), int64(2), int64(1), int64(12))
 
-	dest := []struct{}{}
+	var dest []struct{}
 	err := query.Query(db, &dest)
 	require.NoError(t, err)
 }
 
-func TestJoinQueryStruct(t *testing.T) {
+func TestSelectFetchFirst(t *testing.T) {
+
+	t.Run("rows only", func(t *testing.T) {
+		stmt := SELECT(Actor.AllColumns).
+			FROM(Actor).
+			ORDER_BY(Actor.ActorID).
+			OFFSET(2).
+			FETCH_FIRST(Int(3)).ROWS_ONLY()
+
+		testutils.AssertStatementSql(t, stmt, `
+SELECT actor.actor_id AS "actor.actor_id",
+     actor.first_name AS "actor.first_name",
+     actor.last_name AS "actor.last_name",
+     actor.last_update AS "actor.last_update"
+FROM dvds.actor
+ORDER BY actor.actor_id
+OFFSET $1
+FETCH FIRST $2 ROWS ONLY;
+`)
+
+		var dest []model.Actor
+
+		err := stmt.Query(db, &dest)
+		require.NoError(t, err)
+		require.Len(t, dest, 3)
+		require.Equal(t, dest[0].ActorID, int32(3))
+		require.Equal(t, dest[2].ActorID, int32(5))
+	})
+
+	t.Run("rows with ties", func(t *testing.T) {
+		skipForCockroachDB(t) // ROWS_WITH_TIES is not supported on cockroachdb
+
+		stmt := SELECT(Actor.AllColumns).
+			FROM(Actor).
+			ORDER_BY(Actor.LastUpdate).
+			FETCH_FIRST(Int(3)).ROWS_WITH_TIES()
+
+		testutils.AssertStatementSql(t, stmt, `
+SELECT actor.actor_id AS "actor.actor_id",
+     actor.first_name AS "actor.first_name",
+     actor.last_name AS "actor.last_name",
+     actor.last_update AS "actor.last_update"
+FROM dvds.actor
+ORDER BY actor.last_update
+FETCH FIRST $1 ROWS WITH TIES;
+`)
+
+		var dest []model.Actor
+
+		err := stmt.Query(db, &dest)
+		require.NoError(t, err)
+		require.Len(t, dest, 200)
+	})
+
+	t.Run("complex expression", func(t *testing.T) {
+		stmt := SELECT(Actor.AllColumns).
+			FROM(Actor).
+			ORDER_BY(Actor.LastUpdate).
+			FETCH_FIRST(IntExp(
+				SELECT(MAX(Store.StoreID)).
+					FROM(Store),
+			)).ROWS_ONLY()
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT actor.actor_id AS "actor.actor_id",
+     actor.first_name AS "actor.first_name",
+     actor.last_name AS "actor.last_name",
+     actor.last_update AS "actor.last_update"
+FROM dvds.actor
+ORDER BY actor.last_update
+FETCH FIRST (
+     SELECT MAX(store.store_id)
+     FROM dvds.store
+) ROWS ONLY;
+`)
+
+		var dest []model.Actor
+
+		err := stmt.Query(db, &dest)
+		require.NoError(t, err)
+		require.Len(t, dest, 2)
+	})
+}
+
+func TestSelectOffsetExpression(t *testing.T) {
+
+	stmt := SELECT(Actor.AllColumns).
+		FROM(Actor).
+		ORDER_BY(Actor.ActorID).
+		OFFSET_e(IntExp(
+			SELECT(MAX(Store.StoreID)).
+				FROM(Store),
+		)).LIMIT(10)
+
+	testutils.AssertDebugStatementSql(t, stmt, `
+SELECT actor.actor_id AS "actor.actor_id",
+     actor.first_name AS "actor.first_name",
+     actor.last_name AS "actor.last_name",
+     actor.last_update AS "actor.last_update"
+FROM dvds.actor
+ORDER BY actor.actor_id
+LIMIT 10
+OFFSET (
+     SELECT MAX(store.store_id)
+     FROM dvds.store
+);
+`)
+
+	var dest []model.Actor
+
+	err := stmt.Query(db, &dest)
+	require.NoError(t, err)
+	require.Len(t, dest, 10)
+	require.Equal(t, dest[0].ActorID, int32(3))
+}
+
+func TestSelectJoinQueryStruct(t *testing.T) {
 
 	expectedSQL := `
 SELECT film_actor.actor_id AS "film_actor.actor_id",
@@ -325,7 +446,7 @@ LIMIT 1000;
 	}
 }
 
-func TestJoinQuerySlice(t *testing.T) {
+func TestSelectJoinQuerySlice(t *testing.T) {
 	expectedSQL := `
 SELECT language.language_id AS "language.language_id",
      language.name AS "language.name",
@@ -354,7 +475,7 @@ LIMIT 15;
 		Film     []model.Film
 	}
 
-	filmsPerLanguage := []FilmsPerLanguage{}
+	var filmsPerLanguage []FilmsPerLanguage
 	limit := 15
 
 	query := Film.
@@ -383,7 +504,149 @@ LIMIT 15;
 	require.Equal(t, len(filmsPerLanguage[0].Film), limit)
 }
 
-func TestExecution1(t *testing.T) {
+// https://github.com/go-jet/jet/issues/226
+func TestSelectDuplicateSlicesInDestination(t *testing.T) {
+
+	type Staffs struct {
+		StaffList []model.Staff
+	}
+
+	type MyStore struct {
+		model.Store
+
+		StaffList  []model.Staff
+		StaffList2 []model.Staff
+		Staffs     Staffs
+	}
+
+	stmt := SELECT(
+		Store.AllColumns,
+		Staff.AllColumns,
+	).FROM(
+		Store.INNER_JOIN(
+			Staff,
+			Staff.StoreID.EQ(Store.StoreID),
+		),
+	)
+
+	var dest []MyStore
+
+	err := stmt.Query(db, &dest)
+	require.NoError(t, err)
+
+	testutils.AssertJSON(t, dest, `
+[
+	{
+		"StoreID": 1,
+		"ManagerStaffID": 1,
+		"AddressID": 1,
+		"LastUpdate": "2006-02-15T09:57:12Z",
+		"StaffList": [
+			{
+				"StaffID": 1,
+				"FirstName": "Mike",
+				"LastName": "Hillyer",
+				"AddressID": 3,
+				"Email": "Mike.Hillyer@sakilastaff.com",
+				"StoreID": 1,
+				"Active": true,
+				"Username": "Mike",
+				"Password": "8cb2237d0679ca88db6464eac60da96345513964",
+				"LastUpdate": "2006-05-16T16:13:11.79328Z",
+				"Picture": "iVBORw0KWgo="
+			}
+		],
+		"StaffList2": [
+			{
+				"StaffID": 1,
+				"FirstName": "Mike",
+				"LastName": "Hillyer",
+				"AddressID": 3,
+				"Email": "Mike.Hillyer@sakilastaff.com",
+				"StoreID": 1,
+				"Active": true,
+				"Username": "Mike",
+				"Password": "8cb2237d0679ca88db6464eac60da96345513964",
+				"LastUpdate": "2006-05-16T16:13:11.79328Z",
+				"Picture": "iVBORw0KWgo="
+			}
+		],
+		"Staffs": {
+			"StaffList": [
+				{
+					"StaffID": 1,
+					"FirstName": "Mike",
+					"LastName": "Hillyer",
+					"AddressID": 3,
+					"Email": "Mike.Hillyer@sakilastaff.com",
+					"StoreID": 1,
+					"Active": true,
+					"Username": "Mike",
+					"Password": "8cb2237d0679ca88db6464eac60da96345513964",
+					"LastUpdate": "2006-05-16T16:13:11.79328Z",
+					"Picture": "iVBORw0KWgo="
+				}
+			]
+		}
+	},
+	{
+		"StoreID": 2,
+		"ManagerStaffID": 2,
+		"AddressID": 2,
+		"LastUpdate": "2006-02-15T09:57:12Z",
+		"StaffList": [
+			{
+				"StaffID": 2,
+				"FirstName": "Jon",
+				"LastName": "Stephens",
+				"AddressID": 4,
+				"Email": "Jon.Stephens@sakilastaff.com",
+				"StoreID": 2,
+				"Active": true,
+				"Username": "Jon",
+				"Password": "8cb2237d0679ca88db6464eac60da96345513964",
+				"LastUpdate": "2006-05-16T16:13:11.79328Z",
+				"Picture": null
+			}
+		],
+		"StaffList2": [
+			{
+				"StaffID": 2,
+				"FirstName": "Jon",
+				"LastName": "Stephens",
+				"AddressID": 4,
+				"Email": "Jon.Stephens@sakilastaff.com",
+				"StoreID": 2,
+				"Active": true,
+				"Username": "Jon",
+				"Password": "8cb2237d0679ca88db6464eac60da96345513964",
+				"LastUpdate": "2006-05-16T16:13:11.79328Z",
+				"Picture": null
+			}
+		],
+		"Staffs": {
+			"StaffList": [
+				{
+					"StaffID": 2,
+					"FirstName": "Jon",
+					"LastName": "Stephens",
+					"AddressID": 4,
+					"Email": "Jon.Stephens@sakilastaff.com",
+					"StoreID": 2,
+					"Active": true,
+					"Username": "Jon",
+					"Password": "8cb2237d0679ca88db6464eac60da96345513964",
+					"LastUpdate": "2006-05-16T16:13:11.79328Z",
+					"Picture": null
+				}
+			]
+		}
+	}
+]
+`)
+}
+
+func TestSelectExecution1(t *testing.T) {
 	stmt := City.
 		INNER_JOIN(Address, Address.CityID.EQ(City.CityID)).
 		INNER_JOIN(Customer, Customer.AddressID.EQ(Address.AddressID)).
@@ -397,8 +660,8 @@ func TestExecution1(t *testing.T) {
 		).
 		WHERE(
 			OR(
-				City.City.EQ(String("London")),
-				City.City.EQ(String("York")),
+				City.City.EQ(Text("London")),
+				City.City.EQ(Text("York")),
 			),
 		).
 		ORDER_BY(
@@ -416,8 +679,8 @@ FROM dvds.city
      INNER JOIN dvds.address ON (address.city_id = city.city_id)
      INNER JOIN dvds.customer ON (customer.address_id = address.address_id)
 WHERE (
-          (city.city = 'London')
-              OR (city.city = 'York')
+          (city.city = 'London'::text)
+              OR (city.city = 'York'::text)
       )
 ORDER BY city.city_id, address.address_id, customer.customer_id;
 `, "London", "York")
@@ -433,7 +696,6 @@ ORDER BY city.city_id, address.address_id, customer.customer_id;
 	}
 
 	err := stmt.Query(db, &dest)
-
 	require.NoError(t, err)
 
 	require.Equal(t, len(dest), 2)
@@ -445,7 +707,7 @@ ORDER BY city.city_id, address.address_id, customer.customer_id;
 
 }
 
-func TestExecution2(t *testing.T) {
+func TestSelectExecution2(t *testing.T) {
 
 	type MyAddress struct {
 		ID          int32 `sql:"primary_key"`
@@ -479,7 +741,7 @@ func TestExecution2(t *testing.T) {
 			Customer.CustomerID.AS("my_customer.id"),
 			Customer.LastName.AS("my_customer.last_name"),
 		).
-		WHERE(City.City.EQ(String("London")).OR(City.City.EQ(String("York")))).
+		WHERE(City.City.EQ(VarChar()("London")).OR(City.City.EQ(VarChar()("York")))).
 		ORDER_BY(City.CityID, Address.AddressID, Customer.CustomerID)
 
 	testutils.AssertDebugStatementSql(t, stmt, `
@@ -492,7 +754,7 @@ SELECT city.city_id AS "my_city.id",
 FROM dvds.city
      INNER JOIN dvds.address ON (address.city_id = city.city_id)
      INNER JOIN dvds.customer ON (customer.address_id = address.address_id)
-WHERE (city.city = 'London') OR (city.city = 'York')
+WHERE (city.city = 'London'::varchar) OR (city.city = 'York'::varchar)
 ORDER BY city.city_id, address.address_id, customer.customer_id;
 `, "London", "York")
 
@@ -506,10 +768,9 @@ ORDER BY city.city_id, address.address_id, customer.customer_id;
 	require.Equal(t, len(dest[0].Customers), 2)
 	require.Equal(t, *dest[0].Customers[0].LastName, "Hoffman")
 	require.Equal(t, *dest[0].Customers[1].LastName, "Vines")
-
 }
 
-func TestExecution3(t *testing.T) {
+func TestSelectExecution3(t *testing.T) {
 
 	var dest []struct {
 		CityID   int32 `sql:"primary_key"`
@@ -537,7 +798,7 @@ func TestExecution3(t *testing.T) {
 			Address.AddressID.AS("address_id"),
 			Address.Address.AS("address_line"),
 		).
-		WHERE(City.City.EQ(String("London")).OR(City.City.EQ(String("York")))).
+		WHERE(City.City.EQ(VarChar(20)("London")).OR(City.City.EQ(VarChar(20)("York")))).
 		ORDER_BY(City.CityID, Address.AddressID, Customer.CustomerID)
 
 	testutils.AssertDebugStatementSql(t, stmt, `
@@ -550,7 +811,7 @@ SELECT city.city_id AS "city_id",
 FROM dvds.city
      INNER JOIN dvds.address ON (address.city_id = city.city_id)
      INNER JOIN dvds.customer ON (customer.address_id = address.address_id)
-WHERE (city.city = 'London') OR (city.city = 'York')
+WHERE (city.city = 'London'::varchar(20)) OR (city.city = 'York'::varchar(20))
 ORDER BY city.city_id, address.address_id, customer.customer_id;
 `, "London", "York")
 
@@ -566,7 +827,7 @@ ORDER BY city.city_id, address.address_id, customer.customer_id;
 	require.Equal(t, *dest[0].Customers[1].LastName, "Vines")
 }
 
-func TestExecution4(t *testing.T) {
+func TestSelectExecution4(t *testing.T) {
 
 	var dest []struct {
 		CityID   int32  `sql:"primary_key" alias:"city.city_id"`
@@ -607,7 +868,7 @@ SELECT city.city_id AS "city.city_id",
 FROM dvds.city
      INNER JOIN dvds.address ON (address.city_id = city.city_id)
      INNER JOIN dvds.customer ON (customer.address_id = address.address_id)
-WHERE (city.city = 'London') OR (city.city = 'York')
+WHERE (city.city = 'London'::text) OR (city.city = 'York'::text)
 ORDER BY city.city_id, address.address_id, customer.customer_id;
 `, "London", "York")
 
@@ -657,44 +918,264 @@ ORDER BY city.city_id, address.address_id, customer.customer_id;
 `)
 }
 
-func TestJoinQuerySliceWithPtrs(t *testing.T) {
+// Test join with custom primary keys (sql.NullInt64)
+func TestSelectExecutionCustomPKTypes1(t *testing.T) {
+
+	var dest []struct {
+		CityID   sql.NullInt64 `sql:"primary_key" alias:"city.city_id"`
+		CityName string        `alias:"city.city"`
+
+		Customers []struct {
+			CustomerID sql.NullInt64 `sql:"primary_key" alias:"customer_id"`
+			LastName   *string       `alias:"last_name"`
+
+			Address struct {
+				AddressID   sql.NullInt64 `sql:"primary_key" alias:"AddressId"`
+				AddressLine string        `alias:"address.address"`
+			} `alias:"address.*"`
+		} `alias:"customer"`
+	}
+
+	stmt := SELECT(
+		City.CityID,
+		City.City,
+		Customer.CustomerID,
+		Customer.LastName,
+		Address.AddressID,
+		Address.Address,
+	).FROM(
+		City.
+			INNER_JOIN(Address, Address.CityID.EQ(City.CityID)).
+			INNER_JOIN(Customer, Customer.AddressID.EQ(Address.AddressID)),
+	).WHERE(
+		City.City.EQ(String("London")).OR(City.City.EQ(String("York"))),
+	).ORDER_BY(
+		City.CityID,
+		Address.AddressID,
+		Customer.CustomerID,
+	)
+
+	testutils.AssertDebugStatementSql(t, stmt, `
+SELECT city.city_id AS "city.city_id",
+     city.city AS "city.city",
+     customer.customer_id AS "customer.customer_id",
+     customer.last_name AS "customer.last_name",
+     address.address_id AS "address.address_id",
+     address.address AS "address.address"
+FROM dvds.city
+     INNER JOIN dvds.address ON (address.city_id = city.city_id)
+     INNER JOIN dvds.customer ON (customer.address_id = address.address_id)
+WHERE (city.city = 'London'::text) OR (city.city = 'York'::text)
+ORDER BY city.city_id, address.address_id, customer.customer_id;
+`, "London", "York")
+
+	err := stmt.Query(db, &dest)
+
+	require.NoError(t, err)
+	require.Equal(t, len(dest), 2)
+	testutils.AssertJSON(t, dest, `
+[
+	{
+		"CityID": {
+			"Int64": 312,
+			"Valid": true
+		},
+		"CityName": "London",
+		"Customers": [
+			{
+				"CustomerID": {
+					"Int64": 252,
+					"Valid": true
+				},
+				"LastName": "Hoffman",
+				"Address": {
+					"AddressID": {
+						"Int64": 256,
+						"Valid": true
+					},
+					"AddressLine": "1497 Yuzhou Drive"
+				}
+			},
+			{
+				"CustomerID": {
+					"Int64": 512,
+					"Valid": true
+				},
+				"LastName": "Vines",
+				"Address": {
+					"AddressID": {
+						"Int64": 517,
+						"Valid": true
+					},
+					"AddressLine": "548 Uruapan Street"
+				}
+			}
+		]
+	},
+	{
+		"CityID": {
+			"Int64": 589,
+			"Valid": true
+		},
+		"CityName": "York",
+		"Customers": [
+			{
+				"CustomerID": {
+					"Int64": 497,
+					"Valid": true
+				},
+				"LastName": "Sledge",
+				"Address": {
+					"AddressID": {
+						"Int64": 502,
+						"Valid": true
+					},
+					"AddressLine": "1515 Korla Way"
+				}
+			}
+		]
+	}
+]
+`)
+}
+
+// Test join with custom primary keys (null.Int)
+func TestSelectExecutionCustomPKTypes2(t *testing.T) {
+
+	var dest []struct {
+		CityID   null.Int `sql:"primary_key" alias:"city.city_id"`
+		CityName string   `alias:"city.city"`
+
+		Customers []struct {
+			CustomerID null.Int `sql:"primary_key" alias:"customer_id"`
+			LastName   *string  `alias:"last_name"`
+
+			Address struct {
+				AddressID   null.Int `sql:"primary_key" alias:"AddressId"`
+				AddressLine string   `alias:"address.address"`
+			} `alias:"address.*"`
+		} `alias:"customer"`
+	}
+
+	stmt := SELECT(
+		City.CityID,
+		City.City,
+		Customer.CustomerID,
+		Customer.LastName,
+		Address.AddressID,
+		Address.Address,
+	).FROM(
+		City.
+			INNER_JOIN(Address, Address.CityID.EQ(City.CityID)).
+			INNER_JOIN(Customer, Customer.AddressID.EQ(Address.AddressID)),
+	).WHERE(
+		City.City.EQ(String("London")).OR(City.City.EQ(String("York"))),
+	).ORDER_BY(
+		City.CityID,
+		Address.AddressID,
+		Customer.CustomerID,
+	)
+
+	testutils.AssertDebugStatementSql(t, stmt, `
+SELECT city.city_id AS "city.city_id",
+     city.city AS "city.city",
+     customer.customer_id AS "customer.customer_id",
+     customer.last_name AS "customer.last_name",
+     address.address_id AS "address.address_id",
+     address.address AS "address.address"
+FROM dvds.city
+     INNER JOIN dvds.address ON (address.city_id = city.city_id)
+     INNER JOIN dvds.customer ON (customer.address_id = address.address_id)
+WHERE (city.city = 'London'::text) OR (city.city = 'York'::text)
+ORDER BY city.city_id, address.address_id, customer.customer_id;
+`, "London", "York")
+
+	err := stmt.Query(db, &dest)
+
+	require.NoError(t, err)
+	require.Equal(t, len(dest), 2)
+	testutils.AssertJSON(t, dest, `
+[
+	{
+		"CityID": 312,
+		"CityName": "London",
+		"Customers": [
+			{
+				"CustomerID": 252,
+				"LastName": "Hoffman",
+				"Address": {
+					"AddressID": 256,
+					"AddressLine": "1497 Yuzhou Drive"
+				}
+			},
+			{
+				"CustomerID": 512,
+				"LastName": "Vines",
+				"Address": {
+					"AddressID": 517,
+					"AddressLine": "548 Uruapan Street"
+				}
+			}
+		]
+	},
+	{
+		"CityID": 589,
+		"CityName": "York",
+		"Customers": [
+			{
+				"CustomerID": 497,
+				"LastName": "Sledge",
+				"Address": {
+					"AddressID": 502,
+					"AddressLine": "1515 Korla Way"
+				}
+			}
+		]
+	}
+]
+`)
+}
+
+func TestSelectJoinQuerySliceWithPtrs(t *testing.T) {
 	type FilmsPerLanguage struct {
 		Language model.Language
 		Film     *[]*model.Film
 	}
 
-	limit := int64(3)
+	query := SELECT(
+		Language.AllColumns,
+		Film.AllColumns,
+	).FROM(
+		Film.
+			INNER_JOIN(Language, Film.LanguageID.EQ(Language.LanguageID)),
+	).LIMIT(
+		int64(3),
+	)
 
-	query := Film.INNER_JOIN(Language, Film.LanguageID.EQ(Language.LanguageID)).
-		SELECT(Language.AllColumns, Film.AllColumns).
-		LIMIT(limit)
-
-	filmsPerLanguageWithPtrs := []*FilmsPerLanguage{}
+	var filmsPerLanguageWithPtrs []*FilmsPerLanguage
 	err := query.Query(db, &filmsPerLanguageWithPtrs)
 
 	require.NoError(t, err)
 	require.Equal(t, len(filmsPerLanguageWithPtrs), 1)
-	require.Equal(t, len(*filmsPerLanguageWithPtrs[0].Film), int(limit))
+	require.Equal(t, len(*filmsPerLanguageWithPtrs[0].Film), 3)
 }
 
 func TestSelect_WithoutUniqueColumnSelected(t *testing.T) {
-	query := Customer.SELECT(Customer.FirstName, Customer.LastName, Customer.Email)
+	query := Customer.SELECT(Customer.FirstName, Customer.LastName, Customer.Email).ORDER_BY(Customer.Email)
 
-	customers := []model.Customer{}
+	var customers []model.Customer
 
 	err := query.Query(db, &customers)
 
 	require.NoError(t, err)
-
-	//spew.Dump(customers)
-
 	require.Equal(t, len(customers), 599)
 }
 
 func TestSelectOrderByAscDesc(t *testing.T) {
-	customersAsc := []model.Customer{}
+	var customersAsc []model.Customer
 
-	err := Customer.SELECT(Customer.CustomerID, Customer.FirstName, Customer.LastName).
+	err := SELECT(Customer.CustomerID, Customer.FirstName, Customer.LastName).
+		FROM(Customer).
 		ORDER_BY(Customer.FirstName.ASC()).
 		Query(db, &customersAsc)
 
@@ -703,7 +1184,7 @@ func TestSelectOrderByAscDesc(t *testing.T) {
 	firstCustomerAsc := customersAsc[0]
 	lastCustomerAsc := customersAsc[len(customersAsc)-1]
 
-	customersDesc := []model.Customer{}
+	var customersDesc []model.Customer
 	err = Customer.SELECT(Customer.CustomerID, Customer.FirstName, Customer.LastName).
 		ORDER_BY(Customer.FirstName.DESC()).
 		Query(db, &customersDesc)
@@ -716,7 +1197,7 @@ func TestSelectOrderByAscDesc(t *testing.T) {
 	testutils.AssertDeepEqual(t, firstCustomerAsc, lastCustomerDesc)
 	testutils.AssertDeepEqual(t, lastCustomerAsc, firstCustomerDesc)
 
-	customersAscDesc := []model.Customer{}
+	var customersAscDesc []model.Customer
 	err = Customer.SELECT(Customer.CustomerID, Customer.FirstName, Customer.LastName).
 		ORDER_BY(Customer.FirstName.ASC(), Customer.LastName.DESC()).
 		Query(db, &customersAscDesc)
@@ -737,6 +1218,233 @@ func TestSelectOrderByAscDesc(t *testing.T) {
 
 	testutils.AssertDeepEqual(t, customerAscDesc326, customersAscDesc[326])
 	testutils.AssertDeepEqual(t, customerAscDesc327, customersAscDesc[327])
+}
+
+func TestSelectOrderBy(t *testing.T) {
+
+	t.Run("default", func(t *testing.T) {
+		stmt := SELECT(
+			Rental.AllColumns,
+		).FROM(
+			Rental,
+		).ORDER_BY(
+			Rental.ReturnDate,
+		).LIMIT(200)
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT rental.rental_id AS "rental.rental_id",
+     rental.rental_date AS "rental.rental_date",
+     rental.inventory_id AS "rental.inventory_id",
+     rental.customer_id AS "rental.customer_id",
+     rental.return_date AS "rental.return_date",
+     rental.staff_id AS "rental.staff_id",
+     rental.last_update AS "rental.last_update"
+FROM dvds.rental
+ORDER BY rental.return_date
+LIMIT 200;
+`)
+		require.NoError(t, stmt.Query(db, &struct{}{}))
+	})
+
+	t.Run("NULLS FIRST", func(t *testing.T) {
+		stmt := SELECT(
+			Rental.AllColumns,
+		).FROM(
+			Rental,
+		).ORDER_BY(
+			Rental.ReturnDate.NULLS_FIRST(),
+		).LIMIT(200)
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT rental.rental_id AS "rental.rental_id",
+     rental.rental_date AS "rental.rental_date",
+     rental.inventory_id AS "rental.inventory_id",
+     rental.customer_id AS "rental.customer_id",
+     rental.return_date AS "rental.return_date",
+     rental.staff_id AS "rental.staff_id",
+     rental.last_update AS "rental.last_update"
+FROM dvds.rental
+ORDER BY rental.return_date NULLS FIRST
+LIMIT 200;
+`)
+		require.NoError(t, stmt.Query(db, &struct{}{}))
+	})
+
+	t.Run("NULLS LAST", func(t *testing.T) {
+		stmt := SELECT(
+			Rental.AllColumns,
+		).FROM(
+			Rental,
+		).ORDER_BY(
+			Rental.ReturnDate.NULLS_LAST(),
+		).LIMIT(200)
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT rental.rental_id AS "rental.rental_id",
+     rental.rental_date AS "rental.rental_date",
+     rental.inventory_id AS "rental.inventory_id",
+     rental.customer_id AS "rental.customer_id",
+     rental.return_date AS "rental.return_date",
+     rental.staff_id AS "rental.staff_id",
+     rental.last_update AS "rental.last_update"
+FROM dvds.rental
+ORDER BY rental.return_date NULLS LAST
+LIMIT 200;
+`)
+		require.NoError(t, stmt.Query(db, &struct{}{}))
+	})
+
+	t.Run("ASC", func(t *testing.T) {
+		stmt := SELECT(
+			Rental.AllColumns,
+		).FROM(
+			Rental,
+		).ORDER_BY(
+			Rental.ReturnDate.ASC(),
+		).LIMIT(200)
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT rental.rental_id AS "rental.rental_id",
+     rental.rental_date AS "rental.rental_date",
+     rental.inventory_id AS "rental.inventory_id",
+     rental.customer_id AS "rental.customer_id",
+     rental.return_date AS "rental.return_date",
+     rental.staff_id AS "rental.staff_id",
+     rental.last_update AS "rental.last_update"
+FROM dvds.rental
+ORDER BY rental.return_date ASC
+LIMIT 200;
+`)
+		require.NoError(t, stmt.Query(db, &struct{}{}))
+	})
+
+	t.Run("ASC NULLS FIRST", func(t *testing.T) {
+		stmt := SELECT(
+			Rental.AllColumns,
+		).FROM(
+			Rental,
+		).ORDER_BY(
+			Rental.ReturnDate.ASC().NULLS_FIRST(),
+		).LIMIT(200)
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT rental.rental_id AS "rental.rental_id",
+     rental.rental_date AS "rental.rental_date",
+     rental.inventory_id AS "rental.inventory_id",
+     rental.customer_id AS "rental.customer_id",
+     rental.return_date AS "rental.return_date",
+     rental.staff_id AS "rental.staff_id",
+     rental.last_update AS "rental.last_update"
+FROM dvds.rental
+ORDER BY rental.return_date ASC NULLS FIRST
+LIMIT 200;
+`)
+
+		require.NoError(t, stmt.Query(db, &struct{}{}))
+	})
+
+	t.Run("ASC NULLS LAST", func(t *testing.T) {
+		stmt := SELECT(
+			Rental.AllColumns,
+		).FROM(
+			Rental,
+		).ORDER_BY(
+			Rental.ReturnDate.ASC().NULLS_LAST(),
+		).LIMIT(200).OFFSET(15800)
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT rental.rental_id AS "rental.rental_id",
+     rental.rental_date AS "rental.rental_date",
+     rental.inventory_id AS "rental.inventory_id",
+     rental.customer_id AS "rental.customer_id",
+     rental.return_date AS "rental.return_date",
+     rental.staff_id AS "rental.staff_id",
+     rental.last_update AS "rental.last_update"
+FROM dvds.rental
+ORDER BY rental.return_date ASC NULLS LAST
+LIMIT 200
+OFFSET 15800;
+`)
+
+		require.NoError(t, stmt.Query(db, &struct{}{}))
+	})
+
+	t.Run("DESC", func(t *testing.T) {
+		stmt := SELECT(
+			Rental.AllColumns,
+		).FROM(
+			Rental,
+		).ORDER_BY(
+			Rental.ReturnDate.DESC(),
+		).LIMIT(200).OFFSET(15800)
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT rental.rental_id AS "rental.rental_id",
+     rental.rental_date AS "rental.rental_date",
+     rental.inventory_id AS "rental.inventory_id",
+     rental.customer_id AS "rental.customer_id",
+     rental.return_date AS "rental.return_date",
+     rental.staff_id AS "rental.staff_id",
+     rental.last_update AS "rental.last_update"
+FROM dvds.rental
+ORDER BY rental.return_date DESC
+LIMIT 200
+OFFSET 15800;
+`)
+
+		require.NoError(t, stmt.Query(db, &struct{}{}))
+	})
+
+	t.Run("DESC NULLS LAST", func(t *testing.T) {
+		stmt := SELECT(
+			Rental.AllColumns,
+		).FROM(
+			Rental,
+		).ORDER_BY(
+			Rental.ReturnDate.DESC().NULLS_LAST(),
+		).LIMIT(200).OFFSET(15800)
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT rental.rental_id AS "rental.rental_id",
+     rental.rental_date AS "rental.rental_date",
+     rental.inventory_id AS "rental.inventory_id",
+     rental.customer_id AS "rental.customer_id",
+     rental.return_date AS "rental.return_date",
+     rental.staff_id AS "rental.staff_id",
+     rental.last_update AS "rental.last_update"
+FROM dvds.rental
+ORDER BY rental.return_date DESC NULLS LAST
+LIMIT 200
+OFFSET 15800;
+`)
+
+		require.NoError(t, stmt.Query(db, &struct{}{}))
+	})
+
+	t.Run("DESC NULLS FIRST", func(t *testing.T) {
+		stmt := SELECT(
+			Rental.AllColumns,
+		).FROM(
+			Rental,
+		).ORDER_BY(
+			Rental.ReturnDate.DESC().NULLS_FIRST(),
+		).LIMIT(200)
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT rental.rental_id AS "rental.rental_id",
+     rental.rental_date AS "rental.rental_date",
+     rental.inventory_id AS "rental.inventory_id",
+     rental.customer_id AS "rental.customer_id",
+     rental.return_date AS "rental.return_date",
+     rental.staff_id AS "rental.staff_id",
+     rental.last_update AS "rental.last_update"
+FROM dvds.rental
+ORDER BY rental.return_date DESC NULLS FIRST
+LIMIT 200;
+`)
+
+		require.NoError(t, stmt.Query(db, &struct{}{}))
+	})
 }
 
 func TestSelectFullJoin(t *testing.T) {
@@ -770,27 +1478,35 @@ ORDER BY customer.customer_id ASC;
 
 	testutils.AssertDebugStatementSql(t, query, expectedSQL)
 
-	allCustomersAndAddress := []struct {
+	var allCustomersAndAddress []struct {
 		Address  *model.Address
 		Customer *model.Customer
-	}{}
+	}
 
 	err := query.Query(db, &allCustomersAndAddress)
 
 	require.NoError(t, err)
 	require.Equal(t, len(allCustomersAndAddress), 603)
 
-	testutils.AssertDeepEqual(t, allCustomersAndAddress[0].Customer, &customer0)
-	require.True(t, allCustomersAndAddress[0].Address != nil)
+	if sourceIsCockroachDB() {
+		nullsFirst := allCustomersAndAddress[0]
+		require.True(t, nullsFirst.Customer == nil)
+		require.True(t, nullsFirst.Address != nil)
 
-	lastCustomerAddress := allCustomersAndAddress[len(allCustomersAndAddress)-1]
+		testutils.AssertDeepEqual(t, allCustomersAndAddress[4].Customer, &customer0)
+		require.True(t, allCustomersAndAddress[0].Address != nil)
+	} else { // postgres
+		testutils.AssertDeepEqual(t, allCustomersAndAddress[0].Customer, &customer0)
+		require.True(t, allCustomersAndAddress[0].Address != nil)
 
-	require.True(t, lastCustomerAddress.Customer == nil)
-	require.True(t, lastCustomerAddress.Address != nil)
+		nullsLast := allCustomersAndAddress[len(allCustomersAndAddress)-1]
+		require.True(t, nullsLast.Customer == nil)
+		require.True(t, nullsLast.Address != nil)
+	}
 
 }
 
-func TestSelectFullCrossJoin(t *testing.T) {
+func TestSelectCrossJoin(t *testing.T) {
 	expectedSQL := `
 SELECT customer.customer_id AS "customer.customer_id",
      customer.store_id AS "customer.store_id",
@@ -935,7 +1651,7 @@ LIMIT 1000;
 	testutils.AssertDeepEqual(t, films[0], thesameLengthFilms{"Alien Center", "Iron Moon", 46})
 }
 
-func TestSubQuery(t *testing.T) {
+func TestSelectSubQuery(t *testing.T) {
 	rRatingFilms :=
 		SELECT(
 			Film.FilmID,
@@ -1101,7 +1817,7 @@ ORDER BY film.film_id ASC;
 
 	testutils.AssertDebugStatementSql(t, query, expectedSQL)
 
-	maxRentalRateFilms := []model.Film{}
+	var maxRentalRateFilms []model.Film
 	err := query.Query(db, &maxRentalRateFilms)
 
 	require.NoError(t, err)
@@ -1113,21 +1829,22 @@ ORDER BY film.film_id ASC;
 	testutils.AssertDeepEqual(t, maxRentalRateFilms[0], model.Film{
 		FilmID:          2,
 		Title:           "Ace Goldfinger",
-		Description:     testutils.StringPtr("A Astounding Epistle of a Database Administrator And a Explorer who must Find a Car in Ancient China"),
-		ReleaseYear:     testutils.Int32Ptr(2006),
+		Description:     ptr.Of("A Astounding Epistle of a Database Administrator And a Explorer who must Find a Car in Ancient China"),
+		ReleaseYear:     ptr.Of(int32(2006)),
 		LanguageID:      1,
 		RentalRate:      4.99,
-		Length:          testutils.Int16Ptr(48),
+		Length:          ptr.Of(int16(48)),
 		ReplacementCost: 12.99,
 		Rating:          &gRating,
 		RentalDuration:  3,
 		LastUpdate:      *testutils.TimestampWithoutTimeZone("2013-05-26 14:50:58.951", 3),
-		SpecialFeatures: testutils.StringPtr("{Trailers,\"Deleted Scenes\"}"),
+		SpecialFeatures: ptr.Of("{Trailers,\"Deleted Scenes\"}"),
 		Fulltext:        "'ace':1 'administr':9 'ancient':19 'astound':4 'car':17 'china':20 'databas':8 'epistl':5 'explor':12 'find':15 'goldfing':2 'must':14",
 	})
 }
 
 func TestSelectGroupByHaving(t *testing.T) {
+
 	expectedSQL := `
 SELECT customer.customer_id AS "customer.customer_id",
      customer.store_id AS "customer.store_id",
@@ -1149,33 +1866,33 @@ SELECT customer.customer_id AS "customer.customer_id",
 FROM dvds.payment
      INNER JOIN dvds.customer ON (customer.customer_id = payment.customer_id)
 GROUP BY customer.customer_id
-HAVING SUM(payment.amount) > 125.6
+HAVING SUM(payment.amount) > 125::real
 ORDER BY customer.customer_id, SUM(payment.amount) ASC;
 `
-	query := Payment.
-		INNER_JOIN(Customer, Customer.CustomerID.EQ(Payment.CustomerID)).
-		SELECT(
-			Customer.AllColumns,
+	query := SELECT(
+		Customer.AllColumns,
 
-			SUMf(Payment.Amount).AS("amount.sum"),
-			AVG(Payment.Amount).AS("amount.avg"),
-			MAX(Payment.PaymentDate).AS("amount.max_date"),
-			MAXf(Payment.Amount).AS("amount.max"),
-			MIN(Payment.PaymentDate).AS("amount.min_date"),
-			MINf(Payment.Amount).AS("amount.min"),
-			COUNT(Payment.Amount).AS("amount.count"),
-		).
-		GROUP_BY(Customer.CustomerID).
-		HAVING(
-			SUMf(Payment.Amount).GT(Float(125.6)),
-		).
-		ORDER_BY(
-			Customer.CustomerID, SUMf(Payment.Amount).ASC(),
-		)
+		SUMf(Payment.Amount).AS("amount.sum"),
+		AVG(Payment.Amount).AS("amount.avg"),
+		MAX(Payment.PaymentDate).AS("amount.max_date"),
+		MAXf(Payment.Amount).AS("amount.max"),
+		MIN(Payment.PaymentDate).AS("amount.min_date"),
+		MINf(Payment.Amount).AS("amount.min"),
+		COUNT(Payment.Amount).AS("amount.count"),
+	).FROM(
+		Payment.
+			INNER_JOIN(Customer, Customer.CustomerID.EQ(Payment.CustomerID)),
+	).GROUP_BY(
+		Customer.CustomerID,
+	).HAVING(
+		SUMf(Payment.Amount).GT(Real(125)),
+	).ORDER_BY(
+		Customer.CustomerID, SUMf(Payment.Amount).ASC(),
+	)
 
 	//fmt.Println(query.DebugSql())
 
-	testutils.AssertDebugStatementSql(t, query, expectedSQL, float64(125.6))
+	testutils.AssertDebugStatementSql(t, query, expectedSQL, float32(125))
 
 	var dest []struct {
 		model.Customer
@@ -1197,11 +1914,260 @@ ORDER BY customer.customer_id, SUM(payment.amount) ASC;
 
 	require.Equal(t, len(dest), 104)
 
+	if sourceIsCockroachDB() {
+		return // small precision difference in result
+	}
 	//testutils.SaveJsonFile(dest, "postgres/testdata/customer_payment_sum.json")
 	testutils.AssertJSONFile(t, dest, "./testdata/results/postgres/customer_payment_sum.json")
 }
 
-func TestAggregateFunctionDistinct(t *testing.T) {
+func TestSelectGroupByGroupingSets(t *testing.T) {
+	skipForCockroachDB(t)
+
+	stmt := SELECT(
+		GROUPING(Inventory.FilmID, Inventory.StoreID).AS("grouping_filmId_store_id"),
+		Inventory.FilmID.AS("film_id"),
+		Inventory.StoreID.AS("store_id"),
+		COUNT(Inventory.InventoryID).AS("count"),
+	).FROM(
+		Inventory,
+	).WHERE(
+		Inventory.FilmID.IN(Int(2), Int(3)),
+	).GROUP_BY(
+		GROUPING_SETS(
+			WRAP(Inventory.FilmID, Inventory.StoreID),
+			WRAP(Inventory.FilmID),
+			WRAP(),
+		),
+	).ORDER_BY(
+		Inventory.FilmID,
+		Inventory.StoreID,
+	)
+
+	testutils.AssertDebugStatementSql(t, stmt, `
+SELECT GROUPING(inventory.film_id, inventory.store_id) AS "grouping_filmId_store_id",
+     inventory.film_id AS "film_id",
+     inventory.store_id AS "store_id",
+     COUNT(inventory.inventory_id) AS "count"
+FROM dvds.inventory
+WHERE inventory.film_id IN (2, 3)
+GROUP BY GROUPING SETS((inventory.film_id, inventory.store_id), (inventory.film_id), ())
+ORDER BY inventory.film_id, inventory.store_id;
+`)
+
+	var dest []struct {
+		GroupingFilmIDStoreID int
+		FilmID                *int
+		StoreID               *int
+		Count                 int
+	}
+
+	err := stmt.Query(db, &dest)
+	require.NoError(t, err)
+
+	//testutils.PrintJson(dest)
+
+	testutils.AssertJSON(t, dest, `
+[
+	{
+		"GroupingFilmIDStoreID": 0,
+		"FilmID": 2,
+		"StoreID": 2,
+		"Count": 3
+	},
+	{
+		"GroupingFilmIDStoreID": 1,
+		"FilmID": 2,
+		"StoreID": null,
+		"Count": 3
+	},
+	{
+		"GroupingFilmIDStoreID": 0,
+		"FilmID": 3,
+		"StoreID": 2,
+		"Count": 4
+	},
+	{
+		"GroupingFilmIDStoreID": 1,
+		"FilmID": 3,
+		"StoreID": null,
+		"Count": 4
+	},
+	{
+		"GroupingFilmIDStoreID": 3,
+		"FilmID": null,
+		"StoreID": null,
+		"Count": 7
+	}
+]
+`)
+}
+
+func TestSelectGroupByCube(t *testing.T) {
+	skipForCockroachDB(t)
+
+	stmt := SELECT(
+		Country.Country.AS("country"),
+		City.City.AS("city"),
+		COUNT(City.CityID).AS("count"),
+	).FROM(
+		City.INNER_JOIN(
+			Country,
+			Country.CountryID.EQ(City.CountryID),
+		),
+	).WHERE(
+		Country.Country.EQ(String("Belarus")),
+	).GROUP_BY(
+		CUBE(Country.Country, City.City),
+	).ORDER_BY(
+		Country.Country,
+		City.City,
+	)
+
+	testutils.AssertDebugStatementSql(t, stmt, `
+SELECT country.country AS "country",
+     city.city AS "city",
+     COUNT(city.city_id) AS "count"
+FROM dvds.city
+     INNER JOIN dvds.country ON (country.country_id = city.country_id)
+WHERE country.country = 'Belarus'::text
+GROUP BY CUBE(country.country, city.city)
+ORDER BY country.country, city.city;
+`)
+
+	var dest []struct {
+		Country string
+		City    string
+		Count   int
+	}
+
+	err := stmt.Query(db, &dest)
+	require.NoError(t, err)
+
+	testutils.AssertJSON(t, dest, `
+[
+	{
+		"Country": "Belarus",
+		"City": "Mogiljov",
+		"Count": 1
+	},
+	{
+		"Country": "",
+		"City": "Mogiljov",
+		"Count": 1
+	},
+	{
+		"Country": "Belarus",
+		"City": "Molodetno",
+		"Count": 1
+	},
+	{
+		"Country": "",
+		"City": "Molodetno",
+		"Count": 1
+	},
+	{
+		"Country": "",
+		"City": "",
+		"Count": 2
+	},
+	{
+		"Country": "Belarus",
+		"City": "",
+		"Count": 2
+	}
+]
+`)
+}
+
+func TestSelectGroupByRollup(t *testing.T) {
+	skipForCockroachDB(t)
+
+	stmt := SELECT(
+		EXTRACT(YEAR, Rental.RentalDate).AS("year"),
+		EXTRACT(MONTH, Rental.RentalDate).AS("month"),
+		EXTRACT(DAY, Rental.RentalDate).AS("day"),
+		COUNT(Rental.RentalID).AS("count"),
+	).FROM(
+		Rental,
+	).WHERE(
+		Rental.RentalDate.LT(Timestamp(2005, 5, 26, 1, 1, 1)),
+	).GROUP_BY(
+		ROLLUP(
+			EXTRACT(YEAR, Rental.RentalDate),
+			EXTRACT(MONTH, Rental.RentalDate),
+			EXTRACT(DAY, Rental.RentalDate),
+		),
+	).ORDER_BY(
+		IntegerColumn("year").ASC(),
+		EXTRACT(MONTH, Rental.RentalDate).ASC(),
+		IntegerColumn("day").ASC(),
+	)
+
+	testutils.AssertDebugStatementSql(t, stmt, `
+SELECT EXTRACT(YEAR FROM rental.rental_date) AS "year",
+     EXTRACT(MONTH FROM rental.rental_date) AS "month",
+     EXTRACT(DAY FROM rental.rental_date) AS "day",
+     COUNT(rental.rental_id) AS "count"
+FROM dvds.rental
+WHERE rental.rental_date < '2005-05-26 01:01:01'::timestamp without time zone
+GROUP BY ROLLUP(EXTRACT(YEAR FROM rental.rental_date), EXTRACT(MONTH FROM rental.rental_date), EXTRACT(DAY FROM rental.rental_date))
+ORDER BY year ASC, EXTRACT(MONTH FROM rental.rental_date) ASC, day ASC;
+`)
+
+	var dest []struct {
+		Year  *int
+		Month *int
+		Day   *int
+		Count int
+	}
+
+	err := stmt.Query(db, &dest)
+	require.NoError(t, err)
+
+	testutils.AssertJSON(t, dest, `
+[
+	{
+		"Year": 2005,
+		"Month": 5,
+		"Day": 24,
+		"Count": 8
+	},
+	{
+		"Year": 2005,
+		"Month": 5,
+		"Day": 25,
+		"Count": 137
+	},
+	{
+		"Year": 2005,
+		"Month": 5,
+		"Day": 26,
+		"Count": 9
+	},
+	{
+		"Year": 2005,
+		"Month": 5,
+		"Day": null,
+		"Count": 154
+	},
+	{
+		"Year": 2005,
+		"Month": null,
+		"Day": null,
+		"Count": 154
+	},
+	{
+		"Year": null,
+		"Month": null,
+		"Day": null,
+		"Count": 154
+	}
+]
+`)
+}
+
+func TestSelectAggregateFunctionDistinct(t *testing.T) {
 	stmt := SELECT(
 		Payment.CustomerID,
 
@@ -1321,18 +2287,18 @@ ORDER BY customer_payment_sum.amount_sum ASC;
 		FirstName:  "Brian",
 		LastName:   "Wyman",
 		AddressID:  323,
-		Email:      testutils.StringPtr("brian.wyman@sakilacustomer.org"),
+		Email:      ptr.Of("brian.wyman@sakilacustomer.org"),
 		Activebool: true,
 		CreateDate: *testutils.TimestampWithoutTimeZone("2006-02-14 00:00:00", 0),
 		LastUpdate: testutils.TimestampWithoutTimeZone("2013-05-26 14:49:45.738", 3),
-		Active:     testutils.Int32Ptr(1),
+		Active:     ptr.Of(int32(1)),
 	})
 
 	require.Equal(t, customersWithAmounts[0].AmountSum, 27.93)
 }
 
 func TestSelectStaff(t *testing.T) {
-	staffs := []model.Staff{}
+	var staffs []model.Staff
 
 	err := Staff.SELECT(Staff.AllColumns).Query(db, &staffs)
 
@@ -1395,9 +2361,6 @@ ORDER BY payment.payment_date ASC;
 	err := query.Query(db, &payments)
 
 	require.NoError(t, err)
-
-	//spew.Dump(payments)
-
 	require.Equal(t, len(payments), 9)
 	testutils.AssertDeepEqual(t, payments[0], model.Payment{
 		PaymentID:   17793,
@@ -1409,20 +2372,20 @@ ORDER BY payment.payment_date ASC;
 	})
 }
 
-func TestUnion(t *testing.T) {
+func TestSelectUnion(t *testing.T) {
 	expectedQuery := `
 (
      SELECT payment.payment_id AS "payment.payment_id",
           payment.amount AS "payment.amount"
      FROM dvds.payment
-     WHERE payment.amount <= 100
+     WHERE payment.amount <= 100::double precision
 )
 UNION ALL
 (
      SELECT payment.payment_id AS "payment.payment_id",
           payment.amount AS "payment.amount"
      FROM dvds.payment
-     WHERE payment.amount >= 200
+     WHERE payment.amount >= 200::double precision
 )
 ORDER BY "payment.payment_id" ASC, "payment.amount" DESC
 LIMIT 10
@@ -1431,20 +2394,18 @@ OFFSET 20;
 	query := UNION_ALL(
 		Payment.
 			SELECT(Payment.PaymentID.AS("payment.payment_id"), Payment.Amount).
-			WHERE(Payment.Amount.LT_EQ(Float(100))),
+			WHERE(Payment.Amount.LT_EQ(Double(100))),
 		Payment.
 			SELECT(Payment.PaymentID, Payment.Amount).
-			WHERE(Payment.Amount.GT_EQ(Float(200))),
-	).
-		ORDER_BY(IntegerColumn("payment.payment_id").ASC(), Payment.Amount.DESC()).
-		LIMIT(10).
-		OFFSET(20)
-
-	//fmt.Println(query.DebugSql())
+			WHERE(Payment.Amount.GT_EQ(Double(200))),
+	).ORDER_BY(
+		IntegerColumn("payment.payment_id").ASC(),
+		Payment.Amount.DESC(),
+	).LIMIT(10).OFFSET(20)
 
 	testutils.AssertDebugStatementSql(t, query, expectedQuery, float64(100), float64(200), int64(10), int64(20))
 
-	dest := []model.Payment{}
+	var dest []model.Payment
 
 	err := query.Query(db, &dest)
 
@@ -1464,7 +2425,57 @@ OFFSET 20;
 	})
 }
 
-func TestAllSetOperators(t *testing.T) {
+func TestSelectUnionOffsetWithExpression(t *testing.T) {
+	stmt := UNION(
+		SELECT(Rental.AllColumns).
+			FROM(Rental).
+			WHERE(Rental.ReturnDate.IS_NULL()),
+
+		SELECT(Rental.AllColumns).
+			FROM(Rental).
+			WHERE(Rental.LastUpdate.GT(LOCALTIMESTAMP())),
+	).OFFSET_e(IntExp(
+		SELECT(Int32(3)),
+	)).LIMIT(10)
+
+	testutils.AssertStatementSql(t, stmt, `
+(
+     SELECT rental.rental_id AS "rental.rental_id",
+          rental.rental_date AS "rental.rental_date",
+          rental.inventory_id AS "rental.inventory_id",
+          rental.customer_id AS "rental.customer_id",
+          rental.return_date AS "rental.return_date",
+          rental.staff_id AS "rental.staff_id",
+          rental.last_update AS "rental.last_update"
+     FROM dvds.rental
+     WHERE rental.return_date IS NULL
+)
+UNION
+(
+     SELECT rental.rental_id AS "rental.rental_id",
+          rental.rental_date AS "rental.rental_date",
+          rental.inventory_id AS "rental.inventory_id",
+          rental.customer_id AS "rental.customer_id",
+          rental.return_date AS "rental.return_date",
+          rental.staff_id AS "rental.staff_id",
+          rental.last_update AS "rental.last_update"
+     FROM dvds.rental
+     WHERE rental.last_update > LOCALTIMESTAMP
+)
+LIMIT $1
+OFFSET (
+     SELECT $2::integer
+);
+`)
+
+	var dest []model.Rental
+
+	err := stmt.Query(db, &dest)
+	require.NoError(t, err)
+	require.Len(t, dest, 10)
+}
+
+func TestSelectAllSetOperators(t *testing.T) {
 	var select1 = Payment.SELECT(Payment.AllColumns).WHERE(Payment.PaymentID.GT_EQ(Int(17600)).AND(Payment.PaymentID.LT(Int(17610))))
 	var select2 = Payment.SELECT(Payment.AllColumns).WHERE(Payment.PaymentID.GT_EQ(Int(17620)).AND(Payment.PaymentID.LT(Int(17630))))
 
@@ -1531,7 +2542,7 @@ func TestAllSetOperators(t *testing.T) {
 
 func TestSelectWithCase(t *testing.T) {
 	expectedQuery := `
-SELECT (CASE payment.staff_id WHEN 1 THEN 'ONE' WHEN 2 THEN 'TWO' WHEN 3 THEN 'THREE' ELSE 'OTHER' END) AS "staff_id_num"
+SELECT (CASE payment.staff_id WHEN 1 THEN 'ONE'::text WHEN 2 THEN 'TWO'::text WHEN 3 THEN 'THREE'::text ELSE 'OTHER'::text END) AS "staff_id_num"
 FROM dvds.payment
 ORDER BY payment.payment_id ASC
 LIMIT 20;
@@ -1569,66 +2580,124 @@ func getRowLockTestData() map[RowLock]string {
 	}
 }
 
-func TestRowLock(t *testing.T) {
+func TestSelectRowLock(t *testing.T) {
+
+	query := SELECT(STAR).
+		FROM(Address).
+		WHERE(Address.AddressID.LT(Int(10)))
+
 	expectedSQL := `
 SELECT *
 FROM dvds.address
-LIMIT 3
+WHERE address.address_id < 10
 FOR`
-	query := Address.
-		SELECT(STAR).
-		LIMIT(3)
 
 	for lockType, lockTypeStr := range getRowLockTestData() {
 		query.FOR(lockType)
 
-		testutils.AssertDebugStatementSql(t, query, expectedSQL+" "+lockTypeStr+";\n", int64(3))
-
-		tx, _ := db.Begin()
-
-		res, err := query.Exec(tx)
-		require.NoError(t, err)
-		rowsAffected, _ := res.RowsAffected()
-		require.Equal(t, rowsAffected, int64(3))
-
-		err = tx.Rollback()
-		require.NoError(t, err)
+		testutils.AssertDebugStatementSql(t, query, expectedSQL+" "+lockTypeStr+";\n", int64(10))
+		testutils.AssertExecAndRollback(t, query, db, 9)
 	}
 
 	for lockType, lockTypeStr := range getRowLockTestData() {
 		query.FOR(lockType.NOWAIT())
 
-		testutils.AssertDebugStatementSql(t, query, expectedSQL+" "+lockTypeStr+" NOWAIT;\n", int64(3))
+		testutils.AssertDebugStatementSql(t, query, expectedSQL+" "+lockTypeStr+" NOWAIT;\n", int64(10))
+		testutils.AssertExecAndRollback(t, query, db, 9)
+	}
 
-		tx, _ := db.Begin()
-
-		res, err := query.Exec(tx)
-		require.NoError(t, err)
-		rowsAffected, _ := res.RowsAffected()
-		require.Equal(t, rowsAffected, int64(3))
-
-		err = tx.Rollback()
-		require.NoError(t, err)
+	if sourceIsCockroachDB() {
+		return // SKIP LOCKED lock wait policy is not supported
 	}
 
 	for lockType, lockTypeStr := range getRowLockTestData() {
 		query.FOR(lockType.SKIP_LOCKED())
 
-		testutils.AssertDebugStatementSql(t, query, expectedSQL+" "+lockTypeStr+" SKIP LOCKED;\n", int64(3))
-
-		tx, _ := db.Begin()
-
-		res, err := query.Exec(tx)
-		require.NoError(t, err)
-		rowsAffected, _ := res.RowsAffected()
-		require.Equal(t, rowsAffected, int64(3))
-
-		err = tx.Rollback()
-		require.NoError(t, err)
+		testutils.AssertDebugStatementSql(t, query, expectedSQL+" "+lockTypeStr+" SKIP LOCKED;\n", int64(10))
+		testutils.AssertExecAndRollback(t, query, db, 9)
 	}
 }
 
-func TestQuickStart(t *testing.T) {
+func TestSelectRowLockWithUpdateOf(t *testing.T) {
+
+	stmt := SELECT(
+		Film.FilmID,
+		Film.Title,
+		Actor.ActorID,
+		Actor.FirstName,
+	).FROM(
+		Film.
+			INNER_JOIN(FilmCategory, FilmCategory.FilmID.EQ(Film.FilmID)).
+			INNER_JOIN(FilmActor, FilmActor.FilmID.EQ(Film.FilmID)).
+			INNER_JOIN(Actor, Actor.ActorID.EQ(FilmActor.ActorID)),
+	).LIMIT(
+		1,
+	).FOR(
+		UPDATE().OF(Film, Actor).NOWAIT(),
+	)
+
+	testutils.AssertDebugStatementSql(t, stmt, `
+SELECT film.film_id AS "film.film_id",
+     film.title AS "film.title",
+     actor.actor_id AS "actor.actor_id",
+     actor.first_name AS "actor.first_name"
+FROM dvds.film
+     INNER JOIN dvds.film_category ON (film_category.film_id = film.film_id)
+     INNER JOIN dvds.film_actor ON (film_actor.film_id = film.film_id)
+     INNER JOIN dvds.actor ON (actor.actor_id = film_actor.actor_id)
+LIMIT 1
+FOR UPDATE OF film, actor NOWAIT;
+`)
+
+	testutils.ExecuteInTxAndRollback(t, db, func(tx qrm.DB) {
+		var dest []struct {
+			model.Film
+
+			CategoryID int
+			Actor      []model.Actor
+		}
+
+		err := stmt.Query(tx, &dest)
+		require.NoError(t, err)
+		require.Len(t, dest, 1)
+	})
+}
+
+func TestSelectRowLockWithUpdateOfAliasedTable(t *testing.T) {
+
+	myFilm := Film.AS("myFilm")
+
+	stmt := SELECT(
+		myFilm.FilmID,
+		myFilm.Title,
+	).FROM(
+		myFilm,
+	).LIMIT(
+		1,
+	).FOR(
+		UPDATE().OF(myFilm),
+	)
+
+	testutils.AssertDebugStatementSql(t, stmt, `
+SELECT "myFilm".film_id AS "myFilm.film_id",
+     "myFilm".title AS "myFilm.title"
+FROM dvds.film AS "myFilm"
+LIMIT 1
+FOR UPDATE OF "myFilm";
+`)
+
+	testutils.ExecuteInTxAndRollback(t, db, func(tx qrm.DB) {
+		var dest []struct {
+			model.Film `alias:"myFilm.*"`
+		}
+
+		err := stmt.Query(tx, &dest)
+		require.NoError(t, err)
+		require.Len(t, dest, 1)
+	})
+}
+
+func TestSelectQuickStart(t *testing.T) {
 
 	var expectedSQL = `
 SELECT actor.actor_id AS "actor.actor_id",
@@ -1660,7 +2729,7 @@ FROM dvds.actor
      INNER JOIN dvds.language ON (language.language_id = film.language_id)
      INNER JOIN dvds.film_category ON (film_category.film_id = film.film_id)
      INNER JOIN dvds.category ON (category.category_id = film_category.category_id)
-WHERE ((language.name = 'English') AND (category.name != 'Action')) AND (film.length > 180)
+WHERE ((language.name = 'English'::char(20)) AND (category.name != 'Action'::text)) AND (film.length > 180::integer)
 ORDER BY actor.actor_id ASC, film.film_id ASC;
 `
 
@@ -1677,15 +2746,15 @@ ORDER BY actor.actor_id ASC, film.film_id ASC;
 			INNER_JOIN(FilmCategory, FilmCategory.FilmID.EQ(Film.FilmID)).
 			INNER_JOIN(Category, Category.CategoryID.EQ(FilmCategory.CategoryID)),
 	).WHERE(
-		Language.Name.EQ(String("English")). // note that every column has type.
-							AND(Category.Name.NOT_EQ(String("Action"))). // String column Language.Name and Category.Name can be compared only with string expression
-							AND(Film.Length.GT(Int(180))),               // Film.Length is integer column and can be compared only with integer expression
+		Language.Name.EQ(Char(20)("English")). // note that every column has type.
+							AND(Category.Name.NOT_EQ(Text("Action"))). // String column Language.Name and Category.Name can be compared only with string expression
+							AND(Film.Length.GT(Int32(180))),           // Film.Length is integer column and can be compared only with integer expression
 	).ORDER_BY(
 		Actor.ActorID.ASC(),
 		Film.FilmID.ASC(),
 	)
 
-	testutils.AssertDebugStatementSql(t, stmt, expectedSQL, "English", "Action", int64(180))
+	testutils.AssertDebugStatementSql(t, stmt, expectedSQL, "English", "Action", int32(180))
 
 	var dest []struct {
 		model.Actor
@@ -1719,7 +2788,7 @@ ORDER BY actor.actor_id ASC, film.film_id ASC;
 	testutils.AssertJSONFile(t, dest2, "./testdata/results/postgres/quick-start-dest2.json")
 }
 
-func TestQuickStartWithSubQueries(t *testing.T) {
+func TestSelectQuickStartWithSubQueries(t *testing.T) {
 
 	filmLogerThan180 := Film.
 		SELECT(Film.AllColumns).
@@ -1784,7 +2853,7 @@ func TestQuickStartWithSubQueries(t *testing.T) {
 	testutils.AssertJSONFile(t, dest2, "./testdata/results/postgres/quick-start-dest2.json")
 }
 
-func TestExpressionWrappers(t *testing.T) {
+func TestSelectExpressionWrappers(t *testing.T) {
 	query := SELECT(
 		BoolExp(Raw("true")),
 		IntExp(Raw("11")),
@@ -1814,7 +2883,7 @@ SELECT true,
 	require.NoError(t, err)
 }
 
-func TestWindowFunction(t *testing.T) {
+func TestSelectWindowFunction(t *testing.T) {
 	var expectedSQL = `
 SELECT AVG(payment.amount) OVER (),
      AVG(payment.amount) OVER (PARTITION BY payment.customer_id),
@@ -1886,7 +2955,7 @@ GROUP BY payment.amount, payment.customer_id, payment.payment_date;
 	require.NoError(t, err)
 }
 
-func TestWindowClause(t *testing.T) {
+func TestSelectWindowClause(t *testing.T) {
 	var expectedSQL = `
 SELECT AVG(payment.amount) OVER (),
      AVG(payment.amount) OVER (w1),
@@ -1923,14 +2992,15 @@ ORDER BY payment.customer_id;
 	require.NoError(t, err)
 }
 
-func TestSimpleView(t *testing.T) {
+func TestSelectSimpleView(t *testing.T) {
 
 	query := SELECT(
 		view.ActorInfo.AllColumns,
-	).
-		FROM(view.ActorInfo).
-		ORDER_BY(view.ActorInfo.ActorID).
-		LIMIT(10)
+	).FROM(
+		view.ActorInfo,
+	).ORDER_BY(
+		view.ActorInfo.ActorID,
+	).LIMIT(10)
 
 	type ActorInfo struct {
 		ActorID   int
@@ -1943,6 +3013,10 @@ func TestSimpleView(t *testing.T) {
 
 	err := query.Query(db, &dest)
 	require.NoError(t, err)
+
+	if sourceIsCockroachDB() {
+		return // skip for cockroach db, FilmInfo is set to '' in ddl
+	}
 
 	testutils.AssertJSON(t, dest[1:2], `
 [
@@ -1957,7 +3031,7 @@ func TestSimpleView(t *testing.T) {
 
 }
 
-func TestJoinViewWithTable(t *testing.T) {
+func TestSelectJoinViewWithTable(t *testing.T) {
 	query := SELECT(
 		view.CustomerList.AllColumns,
 		Rental.AllColumns,
@@ -1983,7 +3057,7 @@ func TestJoinViewWithTable(t *testing.T) {
 	require.Equal(t, len(dest[1].Rentals), 27)
 }
 
-func TestDynamicProjectionList(t *testing.T) {
+func TestSelectDynamicProjectionList(t *testing.T) {
 
 	var request struct {
 		ColumnsToSelect []string
@@ -2030,15 +3104,15 @@ LIMIT 3;
 	require.Equal(t, len(dest), 3)
 }
 
-func TestDynamicCondition(t *testing.T) {
+func TestSelectDynamicCondition(t *testing.T) {
 	var request struct {
 		CustomerID *int64
 		Email      *string
 		Active     *bool
 	}
 
-	request.CustomerID = testutils.Int64Ptr(1)
-	request.Active = testutils.BoolPtr(true)
+	request.CustomerID = ptr.Of(int64(1))
+	request.Active = ptr.Of(true)
 
 	// ...
 
@@ -2080,7 +3154,7 @@ WHERE ($1::boolean AND (customer.customer_id = $2)) AND (customer.activebool = $
 	testutils.AssertDeepEqual(t, dest[0], customer0)
 }
 
-func TestLateral(t *testing.T) {
+func TestSelectLateral(t *testing.T) {
 
 	languages := LATERAL(
 		SELECT(
@@ -2088,7 +3162,7 @@ func TestLateral(t *testing.T) {
 		).FROM(
 			Language,
 		).WHERE(
-			Language.Name.NOT_IN(String("spanish")).
+			Language.Name.NOT_IN(Char(20)("Spanish"), Char(20)("Catalan")).
 				AND(Film.LanguageID.EQ(Language.LanguageID)),
 		),
 	).AS("films")
@@ -2117,7 +3191,7 @@ FROM dvds.film
                language.name AS "language.name",
                language.last_update AS "language.last_update"
           FROM dvds.language
-          WHERE (language.name NOT IN ('spanish')) AND (film.language_id = language.language_id)
+          WHERE (language.name NOT IN ('Spanish'::char(20), 'Catalan'::char(20))) AND (film.language_id = language.language_id)
      ) AS films
 WHERE film.film_id = 1
 ORDER BY film.film_id
@@ -2162,7 +3236,7 @@ FROM dvds.film,
                language.name AS "language.name",
                language.last_update AS "language.last_update"
           FROM dvds.language
-          WHERE (language.name NOT IN ('spanish')) AND (film.language_id = language.language_id)
+          WHERE (language.name NOT IN ('Spanish'::char(20), 'Catalan'::char(20))) AND (film.language_id = language.language_id)
      ) AS films
 WHERE film.film_id = 1
 ORDER BY film.film_id
@@ -2252,7 +3326,7 @@ type ActorWrap struct {
 	Films []FilmWrap
 }
 
-func TestRecursionScanNxM(t *testing.T) {
+func TestSelectRecursionScanNxM(t *testing.T) {
 
 	stmt := SELECT(
 		Actor.AllColumns,
@@ -2395,7 +3469,7 @@ type StaffWrap struct {
 	Store StoreWrap
 }
 
-func TestRecursionScanNx1(t *testing.T) {
+func TestSelectRecursionScanNx1(t *testing.T) {
 	stmt := SELECT(
 		Store.AllColumns,
 		Staff.AllColumns,
@@ -2542,7 +3616,7 @@ type ManagerInfo struct {
 	Store *StoreInfo
 }
 
-func TestRecursionScan1x1(t *testing.T) {
+func TestSelectRecursionScan1x1(t *testing.T) {
 
 	stmt := SELECT(
 		Store.AllColumns,
@@ -2607,7 +3681,7 @@ func TestRecursionScan1x1(t *testing.T) {
 // In parameterized statements integer literals, like Int(num), are replaced with a placeholders. For some expressions,
 // postgres interpreter will not have enough information to deduce the type. If this is the case postgres returns an error.
 // Int8, Int16, .... functions will add automatic type cast over placeholder, so type deduction is always possible.
-func TestLiteralTypeDeduction(t *testing.T) {
+func TestSelectLiteralTypeDeduction(t *testing.T) {
 	stmt := SELECT(
 		SUM(
 			CASE().WHEN(Staff.Active.IS_TRUE()).
@@ -2629,7 +3703,9 @@ func GET_FILM_COUNT(lenFrom, lenTo IntegerExpression) IntegerExpression {
 	return IntExp(Func("dvds.get_film_count", lenFrom, lenTo))
 }
 
-func TestCustomFunctionCall(t *testing.T) {
+func TestSelectCustomFunctionCall(t *testing.T) {
+	skipForCockroachDB(t)
+
 	stmt := SELECT(
 		GET_FILM_COUNT(Int(100), Int(120)).AS("film_count"),
 	)
@@ -2661,4 +3737,233 @@ SELECT dvds.get_film_count(100, 120) AS "film_count";
 	err = stmt3.Query(db, &dest)
 	require.NoError(t, err)
 	require.Equal(t, dest.FilmCount, 165)
+}
+
+func TestSelectScanUsingConn(t *testing.T) {
+	conn, err := db.Conn(context.Background())
+	require.NoError(t, err)
+	defer conn.Close()
+
+	stmt := SELECT(Actor.AllColumns).
+		FROM(Actor).
+		DISTINCT().
+		WHERE(Actor.ActorID.EQ(Int(2)))
+
+	var actor model.Actor
+	err = stmt.Query(conn, &actor)
+	require.NoError(t, err)
+	err = stmt.QueryContext(context.Background(), conn, &actor)
+	require.NoError(t, err)
+	testutils.AssertDeepEqual(t, actor, model.Actor{
+		ActorID:    2,
+		FirstName:  "Nick",
+		LastName:   "Wahlberg",
+		LastUpdate: *testutils.TimestampWithoutTimeZone("2013-05-26 14:47:57.62", 2),
+	})
+
+	_, err = stmt.Exec(conn)
+	require.NoError(t, err)
+	_, err = stmt.ExecContext(context.Background(), conn)
+	require.NoError(t, err)
+
+	t.Run("ensure qrm.DB still works", func(t *testing.T) {
+		var qrmDB qrm.DB = db
+
+		err = stmt.Query(qrmDB, &actor)
+		require.NoError(t, err)
+		err = stmt.QueryContext(context.Background(), qrmDB, &actor)
+		require.NoError(t, err)
+
+		_, err = stmt.Exec(qrmDB)
+		require.NoError(t, err)
+		_, err = stmt.ExecContext(context.Background(), qrmDB)
+		require.NoError(t, err)
+	})
+}
+
+func TestSelectConditionalFunctions(t *testing.T) {
+	stmt := SELECT(
+		EXISTS(
+			Film.SELECT(Film.FilmID).WHERE(Film.RentalDuration.GT(Int(100))),
+		).AS("exists"),
+		CASE(Film.Length.GT(Int(120))).
+			WHEN(Bool(true)).THEN(Text("long film")).
+			ELSE(Text("short film")).AS("case"),
+		COALESCE(Film.Description, Text("none")).AS("coalesce"),
+		NULLIF(Film.ReleaseYear, Int(200)).AS("null_if"),
+		GREATEST(Film.RentalDuration, Int(4), Int(5)).AS("greatest"),
+		LEAST(Film.RentalDuration, Int(7), Int(6)).AS("least"),
+	).FROM(
+		Film,
+	).WHERE(
+		Film.FilmID.LT(Int(5)),
+	).ORDER_BY(
+		Film.FilmID,
+	)
+
+	testutils.AssertDebugStatementSql(t, stmt, `
+SELECT (EXISTS (
+          SELECT film.film_id AS "film.film_id"
+          FROM dvds.film
+          WHERE film.rental_duration > 100
+     )) AS "exists",
+     (CASE (film.length > 120) WHEN TRUE::boolean THEN 'long film'::text ELSE 'short film'::text END) AS "case",
+     COALESCE(film.description, 'none'::text) AS "coalesce",
+     NULLIF(film.release_year, 200) AS "null_if",
+     GREATEST(film.rental_duration, 4, 5) AS "greatest",
+     LEAST(film.rental_duration, 7, 6) AS "least"
+FROM dvds.film
+WHERE film.film_id < 5
+ORDER BY film.film_id;
+`)
+
+	var res []struct {
+		Exists   bool
+		Case     string
+		Coalesce string
+		NullIf   string
+		Greatest string
+		Least    string
+	}
+
+	err := stmt.Query(db, &res)
+	require.NoError(t, err)
+
+	testutils.AssertJSON(t, res, `
+[
+	{
+		"Exists": false,
+		"Case": "short film",
+		"Coalesce": "A Epic Drama of a Feminist And a Mad Scientist who must Battle a Teacher in The Canadian Rockies",
+		"NullIf": "2006",
+		"Greatest": "6",
+		"Least": "6"
+	},
+	{
+		"Exists": false,
+		"Case": "short film",
+		"Coalesce": "A Astounding Epistle of a Database Administrator And a Explorer who must Find a Car in Ancient China",
+		"NullIf": "2006",
+		"Greatest": "5",
+		"Least": "3"
+	},
+	{
+		"Exists": false,
+		"Case": "short film",
+		"Coalesce": "A Astounding Reflection of a Lumberjack And a Car who must Sink a Lumberjack in A Baloon Factory",
+		"NullIf": "2006",
+		"Greatest": "7",
+		"Least": "6"
+	},
+	{
+		"Exists": false,
+		"Case": "short film",
+		"Coalesce": "A Fanciful Documentary of a Frisbee And a Lumberjack who must Chase a Monkey in A Shark Tank",
+		"NullIf": "2006",
+		"Greatest": "5",
+		"Least": "5"
+	}
+]
+`)
+}
+
+func TestCustomSetReturningFunction(t *testing.T) {
+	skipForCockroachDB(t) // no set Set-Returning Functions
+
+	inventoryID := IntegerColumn("inventoryID")
+	filmsInStock := CTE("film_in_stock", inventoryID)
+
+	stmt := WITH(
+		filmsInStock.AS(
+			RawStatement("SELECT * FROM dvds.film_in_stock(#filmID, #storeID)",
+				RawArgs{
+					"#filmID":  1,
+					"#storeID": 2,
+				}),
+		),
+	)(
+		SELECT(
+			Inventory.AllColumns,
+		).FROM(Inventory.
+			INNER_JOIN(filmsInStock, Inventory.InventoryID.EQ(inventoryID)),
+		),
+	)
+
+	testutils.AssertStatementSql(t, stmt, `
+WITH film_in_stock ("inventoryID") AS (SELECT * FROM dvds.film_in_stock($1, $2)
+)
+SELECT inventory.inventory_id AS "inventory.inventory_id",
+     inventory.film_id AS "inventory.film_id",
+     inventory.store_id AS "inventory.store_id",
+     inventory.last_update AS "inventory.last_update"
+FROM dvds.inventory
+     INNER JOIN film_in_stock ON (inventory.inventory_id = film_in_stock."inventoryID");
+`)
+
+	var dest []model.Inventory
+
+	err := stmt.Query(db, &dest)
+
+	require.NoError(t, err)
+	testutils.AssertJSON(t, dest, `
+[
+	{
+		"InventoryID": 5,
+		"FilmID": 1,
+		"StoreID": 2,
+		"LastUpdate": "2006-02-15T10:09:17Z"
+	},
+	{
+		"InventoryID": 7,
+		"FilmID": 1,
+		"StoreID": 2,
+		"LastUpdate": "2006-02-15T10:09:17Z"
+	},
+	{
+		"InventoryID": 8,
+		"FilmID": 1,
+		"StoreID": 2,
+		"LastUpdate": "2006-02-15T10:09:17Z"
+	}
+]
+`)
+}
+
+var customer0 = model.Customer{
+	CustomerID: 1,
+	StoreID:    1,
+	FirstName:  "Mary",
+	LastName:   "Smith",
+	Email:      ptr.Of("mary.smith@sakilacustomer.org"),
+	AddressID:  5,
+	Activebool: true,
+	CreateDate: *testutils.TimestampWithoutTimeZone("2006-02-14 00:00:00", 0),
+	LastUpdate: testutils.TimestampWithoutTimeZone("2013-05-26 14:49:45.738", 3),
+	Active:     ptr.Of(int32(1)),
+}
+
+var customer1 = model.Customer{
+	CustomerID: 2,
+	StoreID:    1,
+	FirstName:  "Patricia",
+	LastName:   "Johnson",
+	Email:      ptr.Of("patricia.johnson@sakilacustomer.org"),
+	AddressID:  6,
+	Activebool: true,
+	CreateDate: *testutils.TimestampWithoutTimeZone("2006-02-14 00:00:00", 0),
+	LastUpdate: testutils.TimestampWithoutTimeZone("2013-05-26 14:49:45.738", 3),
+	Active:     ptr.Of(int32(1)),
+}
+
+var lastCustomer = model.Customer{
+	CustomerID: 599,
+	StoreID:    2,
+	FirstName:  "Austin",
+	LastName:   "Cintron",
+	Email:      ptr.Of("austin.cintron@sakilacustomer.org"),
+	AddressID:  605,
+	Activebool: true,
+	CreateDate: *testutils.TimestampWithoutTimeZone("2006-02-14 00:00:00", 0),
+	LastUpdate: testutils.TimestampWithoutTimeZone("2013-05-26 14:49:45.738", 3),
+	Active:     ptr.Of(int32(1)),
 }

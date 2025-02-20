@@ -12,11 +12,6 @@ func OR(expressions ...BoolExpression) BoolExpression {
 	return newBoolExpressionListOperator("OR", expressions...)
 }
 
-// ROW is construct one table row from list of expressions.
-func ROW(expressions ...Expression) Expression {
-	return NewFunc("ROW", expressions, nil)
-}
-
 // ------------------ Mathematical functions ---------------//
 
 // ABSf calculates absolute value from float expression
@@ -468,6 +463,60 @@ func REGEXP_LIKE(stringExp StringExpression, pattern StringExpression, matchType
 	return newBoolFunc("REGEXP_LIKE", stringExp, pattern)
 }
 
+//----------Range Type Functions ----------------------//
+
+// LOWER_BOUND returns range expressions lower bound. Returns null if range is empty or the requested bound is infinite.
+func LOWER_BOUND[T Expression](rangeExpression Range[T]) T {
+	return rangeTypeCaster[T](rangeExpression, NewFunc("LOWER", []Expression{rangeExpression}, nil))
+}
+
+// UPPER_BOUND returns range expressions upper bound. Returns null if range is empty or the requested bound is infinite.
+func UPPER_BOUND[T Expression](rangeExpression Range[T]) T {
+	return rangeTypeCaster[T](rangeExpression, NewFunc("UPPER", []Expression{rangeExpression}, nil))
+}
+
+func rangeTypeCaster[T Expression](rangeExpression Range[T], exp Expression) T {
+	var i Expression
+	switch rangeExpression.(type) {
+	case Range[Int4Expression], Range[Int8Expression]:
+		i = IntExp(exp)
+	case Range[NumericExpression]:
+		i = FloatExp(exp)
+	case Range[DateExpression]:
+		i = DateExp(exp)
+	case Range[TimestampExpression]:
+		i = TimestampExp(exp)
+	case Range[TimestampzExpression]:
+		i = TimestampzExp(exp)
+	}
+	return i.(T)
+}
+
+// IS_EMPTY returns true if range is empty
+func IS_EMPTY[T Expression](rangeExpression Range[T]) BoolExpression {
+	return newBoolFunc("ISEMPTY", rangeExpression)
+}
+
+// LOWER_INC returns true if lower bound is inclusive. Returns false for empty range.
+func LOWER_INC[T Expression](rangeExpression Range[T]) BoolExpression {
+	return newBoolFunc("LOWER_INC", rangeExpression)
+}
+
+// UPPER_INC returns true if upper bound is inclusive. Returns false for empty range.
+func UPPER_INC[T Expression](rangeExpression Range[T]) BoolExpression {
+	return newBoolFunc("UPPER_INC", rangeExpression)
+}
+
+// LOWER_INF returns true if upper bound is infinite. Returns false for empty range.
+func LOWER_INF[T Expression](rangeExpression Range[T]) BoolExpression {
+	return newBoolFunc("LOWER_INF", rangeExpression)
+}
+
+// UPPER_INF returns true if lower bound is infinite. Returns false for empty range.
+func UPPER_INF[T Expression](rangeExpression Range[T]) BoolExpression {
+	return newBoolFunc("UPPER_INF", rangeExpression)
+}
+
 //----------Data Type Formatting Functions ----------------------//
 
 // TO_CHAR converts expression to string with format
@@ -491,6 +540,11 @@ func TO_TIMESTAMP(timestampzStr, format StringExpression) TimestampzExpression {
 }
 
 //----------------- Date/Time Functions and Operators ---------------//
+
+// EXTRACT extracts time component from time expression
+func EXTRACT(field string, from Expression) Expression {
+	return CustomExpression(Token("EXTRACT("), Token(field), Token("FROM"), from, Token(")"))
+}
 
 // CURRENT_DATE returns current date
 func CURRENT_DATE() DateExpression {
@@ -597,16 +651,16 @@ func LEAST(value Expression, values ...Expression) Expression {
 type funcExpressionImpl struct {
 	ExpressionInterfaceImpl
 
-	name        string
-	expressions []Expression
-	noBrackets  bool
+	name       string
+	parameters parametersSerializer
+	noBrackets bool
 }
 
 // NewFunc creates new function with name and expressions parameters
 func NewFunc(name string, expressions []Expression, parent Expression) *funcExpressionImpl {
 	funcExp := &funcExpressionImpl{
-		name:        name,
-		expressions: parameters(expressions),
+		name:       name,
+		parameters: parametersSerializer(expressions),
 	}
 
 	if parent != nil {
@@ -618,18 +672,43 @@ func NewFunc(name string, expressions []Expression, parent Expression) *funcExpr
 	return funcExp
 }
 
-func parameters(expressions []Expression) []Expression {
-	var ret []Expression
-
-	for _, expression := range expressions {
-		if _, isStatement := expression.(Statement); isStatement {
-			ret = append(ret, expression)
-		} else {
-			ret = append(ret, skipWrap(expression))
-		}
+func (f *funcExpressionImpl) serialize(statement StatementType, out *SQLBuilder, options ...SerializeOption) {
+	if serializeOverride := out.Dialect.FunctionSerializeOverride(f.name); serializeOverride != nil {
+		serializeOverrideFunc := serializeOverride(ExpressionListToSerializerList(f.parameters)...)
+		serializeOverrideFunc(statement, out, FallTrough(options)...)
+		return
 	}
 
-	return ret
+	addBrackets := !f.noBrackets || len(f.parameters) > 0
+
+	if addBrackets {
+		out.WriteString(f.name + "(")
+	} else {
+		out.WriteString(f.name)
+	}
+
+	f.parameters.serialize(statement, out, options...)
+
+	if addBrackets {
+		out.WriteString(")")
+	}
+}
+
+type parametersSerializer []Expression
+
+func (p parametersSerializer) serialize(statement StatementType, out *SQLBuilder, options ...SerializeOption) {
+
+	for i, expression := range p {
+		if i > 0 {
+			out.WriteString(", ")
+		}
+
+		if _, isStatement := expression.(Statement); isStatement {
+			expression.serialize(statement, out, options...)
+		} else {
+			expression.serialize(statement, out, append(options, NoWrap, Ident)...)
+		}
+	}
 }
 
 // NewFloatWindowFunc creates new float function with name and expressions
@@ -639,28 +718,6 @@ func newWindowFunc(name string, expressions ...Expression) windowExpression {
 	newFun.ExpressionInterfaceImpl.Parent = windowExpr
 
 	return windowExpr
-}
-
-func (f *funcExpressionImpl) serialize(statement StatementType, out *SQLBuilder, options ...SerializeOption) {
-	if serializeOverride := out.Dialect.FunctionSerializeOverride(f.name); serializeOverride != nil {
-		serializeOverrideFunc := serializeOverride(ExpressionListToSerializerList(f.expressions)...)
-		serializeOverrideFunc(statement, out, FallTrough(options)...)
-		return
-	}
-
-	addBrackets := !f.noBrackets || len(f.expressions) > 0
-
-	if addBrackets {
-		out.WriteString(f.name + "(")
-	} else {
-		out.WriteString(f.name)
-	}
-
-	serializeExpressionList(statement, f.expressions, ", ", out)
-
-	if addBrackets {
-		out.WriteString(")")
-	}
 }
 
 type boolFunc struct {
@@ -834,4 +891,36 @@ func newTimestampzFunc(name string, expressions ...Expression) *timestampzFunc {
 // Func can be used to call custom or unsupported database functions.
 func Func(name string, expressions ...Expression) Expression {
 	return NewFunc(name, expressions, nil)
+}
+
+func NumRange(lowNum, highNum NumericExpression, bounds ...StringExpression) Range[NumericExpression] {
+	return NumRangeExp(NewFunc("numrange", rangeFuncParamCombiner(lowNum, highNum, bounds...), nil))
+}
+
+func Int4Range(lowNum, highNum IntegerExpression, bounds ...StringExpression) Range[Int4Expression] {
+	return Int4RangeExp(NewFunc("int4range", rangeFuncParamCombiner(lowNum, highNum, bounds...), nil))
+}
+
+func Int8Range(lowNum, highNum Int8Expression, bounds ...StringExpression) Range[Int8Expression] {
+	return Int8RangeExp(NewFunc("int8range", rangeFuncParamCombiner(lowNum, highNum, bounds...), nil))
+}
+
+func TsRange(lowTs, highTs TimestampExpression, bounds ...StringExpression) Range[TimestampExpression] {
+	return TsRangeExp(NewFunc("tsrange", rangeFuncParamCombiner(lowTs, highTs, bounds...), nil))
+}
+
+func TstzRange(lowTs, highTs TimestampzExpression, bounds ...StringExpression) Range[TimestampzExpression] {
+	return TstzRangeExp(NewFunc("tstzrange", rangeFuncParamCombiner(lowTs, highTs, bounds...), nil))
+}
+
+func DateRange(lowTs, highTs DateExpression, bounds ...StringExpression) Range[DateExpression] {
+	return DateRangeExp(NewFunc("daterange", rangeFuncParamCombiner(lowTs, highTs, bounds...), nil))
+}
+
+func rangeFuncParamCombiner(low, high Expression, bounds ...StringExpression) []Expression {
+	exp := []Expression{low, high}
+	if len(bounds) != 0 {
+		exp = append(exp, bounds[0])
+	}
+	return exp
 }

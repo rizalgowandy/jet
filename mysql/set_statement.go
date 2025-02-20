@@ -63,7 +63,6 @@ func newSetStatementImpl(operator string, all bool, selects []jet.SerializerStat
 	newSetStatement.setOperator.All = all
 	newSetStatement.setOperator.Selects = selects
 	newSetStatement.setOperator.Limit.Count = -1
-	newSetStatement.setOperator.Offset.Count = -1
 
 	newSetStatement.setOperatorsImpl.parent = newSetStatement
 
@@ -81,12 +80,12 @@ func (s *setStatementImpl) LIMIT(limit int64) setStatement {
 }
 
 func (s *setStatementImpl) OFFSET(offset int64) setStatement {
-	s.setOperator.Offset.Count = offset
+	s.setOperator.Offset.Count = Int(offset)
 	return s
 }
 
 func (s *setStatementImpl) AsTable(alias string) SelectTable {
-	return newSelectTable(s, alias)
+	return newSelectTable(s, alias, nil)
 }
 
 const (

@@ -1,6 +1,10 @@
 package postgres
 
 import (
+	"github.com/go-jet/jet/v2/internal/utils/ptr"
+	"github.com/stretchr/testify/assert"
+
+	"github.com/go-jet/jet/v2/qrm"
 	"testing"
 	"time"
 
@@ -16,68 +20,170 @@ import (
 	"github.com/go-jet/jet/v2/tests/testdata/results/common"
 )
 
+var AllTypesAllColumns = AllTypes.AllColumns.
+	Except(IntegerColumn("rowid")) // cockroachDB: exclude rowid column
+
 func TestAllTypesSelect(t *testing.T) {
-	dest := []model.AllTypes{}
+	var dest []model.AllTypes
 
-	err := AllTypes.SELECT(
-		AllTypes.AllColumns,
-	).LIMIT(2).
+	err := AllTypes.SELECT(AllTypesAllColumns).
+		LIMIT(2).
 		Query(db, &dest)
-	require.NoError(t, err)
 
+	require.NoError(t, err)
 	testutils.AssertDeepEqual(t, dest[0], allTypesRow0)
 	testutils.AssertDeepEqual(t, dest[1], allTypesRow1)
 }
 
 func TestAllTypesViewSelect(t *testing.T) {
 	type AllTypesView model.AllTypes
+	var dest []AllTypesView
 
-	dest := []AllTypesView{}
+	err := SELECT(view.AllTypesView.AllColumns).
+		FROM(view.AllTypesView).
+		Query(db, &dest)
 
-	err := view.AllTypesView.SELECT(view.AllTypesView.AllColumns).Query(db, &dest)
 	require.NoError(t, err)
-
 	testutils.AssertDeepEqual(t, dest[0], AllTypesView(allTypesRow0))
 	testutils.AssertDeepEqual(t, dest[1], AllTypesView(allTypesRow1))
+}
+
+func TestMaterializedViewAllTypes(t *testing.T) {
+	stmt := SELECT(
+		view.AllTypesMaterializedView.AllColumns.
+			Except(IntegerColumn("rowid")), // cockroachDB: exclude rowid column
+	).FROM(
+		view.AllTypesMaterializedView,
+	)
+
+	type AllTypesMaterializedView model.AllTypes
+	var dest []AllTypesMaterializedView
+
+	err := stmt.Query(db, &dest)
+
+	require.NoError(t, err)
+	testutils.AssertDeepEqual(t, dest[0], AllTypesMaterializedView(allTypesRow0))
+	testutils.AssertDeepEqual(t, dest[1], AllTypesMaterializedView(allTypesRow1))
 }
 
 func TestAllTypesInsertModel(t *testing.T) {
 	skipForPgxDriver(t) // pgx driver bug ERROR: date/time field value out of range: "0000-01-01 12:05:06Z" (SQLSTATE 22008)
 
-	query := AllTypes.INSERT(AllTypes.AllColumns).
+	query := AllTypes.INSERT(AllTypesAllColumns).
 		MODEL(allTypesRow0).
 		MODEL(&allTypesRow1).
 		RETURNING(AllTypes.AllColumns)
 
-	dest := []model.AllTypes{}
-	err := query.Query(db, &dest)
-	require.NoError(t, err)
+	testutils.ExecuteInTxAndRollback(t, db, func(tx qrm.DB) {
+		var dest []model.AllTypes
+		err := query.Query(tx, &dest)
+		require.NoError(t, err)
 
-	require.Equal(t, len(dest), 2)
-	testutils.AssertDeepEqual(t, dest[0], allTypesRow0)
-	testutils.AssertDeepEqual(t, dest[1], allTypesRow1)
+		if sourceIsCockroachDB() {
+			return
+		}
+		require.Equal(t, len(dest), 2)
+		testutils.AssertDeepEqual(t, dest[0], allTypesRow0)
+		testutils.AssertDeepEqual(t, dest[1], allTypesRow1)
+	})
 }
 
 func TestAllTypesInsertQuery(t *testing.T) {
-	query := AllTypes.INSERT(AllTypes.AllColumns).
+	query := AllTypes.INSERT(AllTypesAllColumns).
 		QUERY(
 			AllTypes.
-				SELECT(AllTypes.AllColumns).
+				SELECT(AllTypesAllColumns).
 				LIMIT(2),
 		).
-		RETURNING(AllTypes.AllColumns)
+		RETURNING(AllTypesAllColumns)
 
-	dest := []model.AllTypes{}
-	err := query.Query(db, &dest)
+	testutils.ExecuteInTxAndRollback(t, db, func(tx qrm.DB) {
+		var dest []model.AllTypes
+		err := query.Query(tx, &dest)
 
+		require.NoError(t, err)
+		require.Equal(t, len(dest), 2)
+		testutils.AssertDeepEqual(t, dest[0], allTypesRow0)
+		testutils.AssertDeepEqual(t, dest[1], allTypesRow1)
+	})
+}
+
+func TestUUIDType(t *testing.T) {
+	id := uuid.MustParse("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11")
+
+	query := AllTypes.
+		SELECT(AllTypes.UUID, AllTypes.UUIDPtr).
+		WHERE(AllTypes.UUID.EQ(UUID(id)))
+
+	testutils.AssertDebugStatementSql(t, query, `
+SELECT all_types.uuid AS "all_types.uuid",
+     all_types.uuid_ptr AS "all_types.uuid_ptr"
+FROM test_sample.all_types
+WHERE all_types.uuid = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11';
+`, "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11")
+
+	result := model.AllTypes{}
+
+	err := query.Query(db, &result)
 	require.NoError(t, err)
-	require.Equal(t, len(dest), 2)
-	testutils.AssertDeepEqual(t, dest[0], allTypesRow0)
-	testutils.AssertDeepEqual(t, dest[1], allTypesRow1)
+	require.Equal(t, result.UUID, uuid.MustParse("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"))
+	testutils.AssertDeepEqual(t, result.UUIDPtr, testutils.UUIDPtr("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"))
+	requireLogged(t, query)
+}
+
+func TestBytea(t *testing.T) {
+	byteArrHex := "\\x48656c6c6f20476f7068657221"
+	byteArrBin := []byte("\x48\x65\x6c\x6c\x6f\x20\x47\x6f\x70\x68\x65\x72\x21")
+
+	insertStmt := AllTypes.INSERT(AllTypes.Bytea, AllTypes.ByteaPtr).
+		VALUES(byteArrHex, byteArrBin).
+		RETURNING(AllTypes.Bytea, AllTypes.ByteaPtr)
+
+	testutils.AssertStatementSql(t, insertStmt, `
+INSERT INTO test_sample.all_types (bytea, bytea_ptr)
+VALUES ($1, $2)
+RETURNING all_types.bytea AS "all_types.bytea",
+          all_types.bytea_ptr AS "all_types.bytea_ptr";
+`, byteArrHex, byteArrBin)
+
+	var inserted model.AllTypes
+	err := insertStmt.Query(db, &inserted)
+	require.NoError(t, err)
+
+	require.Equal(t, string(*inserted.ByteaPtr), "Hello Gopher!")
+	// It is not possible to initiate bytea column using hex format '\xDEADBEEF' with pq driver.
+	// pq driver always encodes parameter string if destination column is of type bytea.
+	// Probably pq driver error.
+	// require.Equal(t, string(inserted.Bytea), "Hello Gopher!")
+
+	stmt := SELECT(
+		AllTypes.Bytea,
+		AllTypes.ByteaPtr,
+	).FROM(
+		AllTypes,
+	).WHERE(
+		AllTypes.ByteaPtr.EQ(Bytea(byteArrBin)),
+	)
+
+	testutils.AssertStatementSql(t, stmt, `
+SELECT all_types.bytea AS "all_types.bytea",
+     all_types.bytea_ptr AS "all_types.bytea_ptr"
+FROM test_sample.all_types
+WHERE all_types.bytea_ptr = $1::bytea;
+`, byteArrBin)
+
+	var dest model.AllTypes
+
+	err = stmt.Query(db, &dest)
+	require.NoError(t, err)
+
+	require.Equal(t, string(*dest.ByteaPtr), "Hello Gopher!")
+	// Probably pq driver error.
+	// require.Equal(t, string(dest.Bytea), "Hello Gopher!")
 }
 
 func TestAllTypesFromSubQuery(t *testing.T) {
-	subQuery := SELECT(AllTypes.AllColumns).
+	subQuery := SELECT(AllTypesAllColumns).
 		FROM(AllTypes).
 		AsTable("allTypesSubQuery")
 
@@ -146,7 +252,9 @@ SELECT "allTypesSubQuery"."all_types.small_int_ptr" AS "all_types.small_int_ptr"
      "allTypesSubQuery"."all_types.text_array" AS "all_types.text_array",
      "allTypesSubQuery"."all_types.jsonb_array" AS "all_types.jsonb_array",
      "allTypesSubQuery"."all_types.text_multi_dim_array_ptr" AS "all_types.text_multi_dim_array_ptr",
-     "allTypesSubQuery"."all_types.text_multi_dim_array" AS "all_types.text_multi_dim_array"
+     "allTypesSubQuery"."all_types.text_multi_dim_array" AS "all_types.text_multi_dim_array",
+     "allTypesSubQuery"."all_types.mood_ptr" AS "all_types.mood_ptr",
+     "allTypesSubQuery"."all_types.mood" AS "all_types.mood"
 FROM (
           SELECT all_types.small_int_ptr AS "all_types.small_int_ptr",
                all_types.small_int AS "all_types.small_int",
@@ -208,13 +316,15 @@ FROM (
                all_types.text_array AS "all_types.text_array",
                all_types.jsonb_array AS "all_types.jsonb_array",
                all_types.text_multi_dim_array_ptr AS "all_types.text_multi_dim_array_ptr",
-               all_types.text_multi_dim_array AS "all_types.text_multi_dim_array"
+               all_types.text_multi_dim_array AS "all_types.text_multi_dim_array",
+               all_types.mood_ptr AS "all_types.mood_ptr",
+               all_types.mood AS "all_types.mood"
           FROM test_sample.all_types
      ) AS "allTypesSubQuery"
 LIMIT 2;
 `)
 
-	dest := []model.AllTypes{}
+	var dest []model.AllTypes
 	err := mainQuery.Query(db, &dest)
 
 	require.NoError(t, err)
@@ -237,24 +347,22 @@ func TestExpressionOperators(t *testing.T) {
 		AllTypes.SmallIntPtr.NOT_IN(AllTypes.SELECT(AllTypes.Integer)).AS("result.not_in_select"),
 	).LIMIT(2)
 
-	//fmt.Println(query.Sql())
-
 	testutils.AssertStatementSql(t, query, `
 SELECT all_types.integer IS NULL AS "result.is_null",
      all_types.date_ptr IS NOT NULL AS "result.is_not_null",
      (all_types.small_int_ptr IN ($1::smallint, $2::smallint)) AS "result.in",
-     (all_types.small_int_ptr IN (
+     (all_types.small_int_ptr IN ((
           SELECT all_types.integer AS "all_types.integer"
           FROM test_sample.all_types
-     )) AS "result.in_select",
+     ))) AS "result.in_select",
      (CURRENT_USER) AS "result.raw",
      ($3 + COALESCE(all_types.small_int_ptr, 0) + $4) AS "result.raw_arg",
      ($5 + all_types.integer + $6 + $5 + $7 + $8) AS "result.raw_arg2",
      (all_types.small_int_ptr NOT IN ($9, $10::smallint, NULL)) AS "result.not_in",
-     (all_types.small_int_ptr NOT IN (
+     (all_types.small_int_ptr NOT IN ((
           SELECT all_types.integer AS "all_types.integer"
           FROM test_sample.all_types
-     )) AS "result.not_in_select"
+     ))) AS "result.not_in_select"
 FROM test_sample.all_types
 LIMIT $11;
 `, int8(11), int8(22), 78, 56, 11, 22, 33, 44, int64(11), int16(22), int64(2))
@@ -266,9 +374,6 @@ LIMIT $11;
 	err := query.Query(db, &dest)
 
 	require.NoError(t, err)
-
-	//testutils.PrintJson(dest)
-
 	testutils.AssertJSON(t, dest, `
 [
 	{
@@ -298,7 +403,6 @@ LIMIT $11;
 }
 
 func TestExpressionCast(t *testing.T) {
-
 	skipForPgxDriver(t) // pgx driver bug 'cannot convert 151 to Text'
 
 	query := AllTypes.SELECT(
@@ -315,19 +419,28 @@ func TestExpressionCast(t *testing.T) {
 		CAST(Int(234)).AS_TEXT(),
 		CAST(String("1/8/1999")).AS_DATE(),
 		CAST(String("04:05:06.789")).AS_TIME(),
-		CAST(String("04:05:06 PST")).AS_TIMEZ(),
+		CAST(String("04:05:06+01:00")).AS_TIMEZ(),
 		CAST(String("1999-01-08 04:05:06")).AS_TIMESTAMP(),
-		CAST(String("January 8 04:05:06 1999 PST")).AS_TIMESTAMPZ(),
+		CAST(String("1999-01-08 04:05:06+01:00")).AS_TIMESTAMPZ(),
 		CAST(String("04:05:06")).AS_INTERVAL(),
 
-		TO_CHAR(AllTypes.Timestamp, String("HH12:MI:SS")),
-		TO_CHAR(AllTypes.Integer, String("999")),
-		TO_CHAR(AllTypes.DoublePrecision, String("999D9")),
-		TO_CHAR(AllTypes.Numeric, String("999D99S")),
+		func() ProjectionList {
+			if sourceIsCockroachDB() {
+				return ProjectionList{NULL}
+			}
 
-		TO_DATE(String("05 Dec 2000"), String("DD Mon YYYY")),
-		TO_NUMBER(String("12,454"), String("99G999D9S")),
-		TO_TIMESTAMP(String("05 Dec 2000"), String("DD Mon YYYY")),
+			// cockroach doesn't support currently
+			return ProjectionList{
+				TO_CHAR(AllTypes.Timestamp, String("HH12:MI:SS")),
+				TO_CHAR(AllTypes.Integer, String("999")),
+				TO_CHAR(AllTypes.DoublePrecision, String("999D9")),
+				TO_CHAR(AllTypes.Numeric, String("999D99S")),
+
+				TO_DATE(String("05 Dec 2000"), String("DD Mon YYYY")),
+				TO_NUMBER(String("12,454"), String("99G999D9S")),
+				TO_TIMESTAMP(String("05 Dec 2000"), String("DD Mon YYYY")),
+			}
+		}(),
 
 		COALESCE(AllTypes.IntegerPtr, AllTypes.SmallIntPtr, NULL, Int(11)),
 		NULLIF(AllTypes.Text, String("(none)")),
@@ -337,28 +450,27 @@ func TestExpressionCast(t *testing.T) {
 		Raw("current_database()"),
 	)
 
-	//fmt.Println(query.DebugSql())
-
-	dest := []struct{}{}
+	var dest []struct{}
 	err := query.Query(db, &dest)
 
 	require.NoError(t, err)
 }
 
 func TestStringOperators(t *testing.T) {
-	skipForPgxDriver(t) // pgx driver bug 'cannot convert 11 to Text'
+	skipForCockroachDB(t) // some string functions are still unimplemented
+	skipForPgxDriver(t)   // pgx driver bug 'cannot convert 11 to Text'
 
 	query := AllTypes.SELECT(
 		AllTypes.Text.EQ(AllTypes.Char),
-		AllTypes.Text.EQ(String("Text")),
+		AllTypes.Text.EQ(Text("Text")),
 		AllTypes.Text.NOT_EQ(AllTypes.VarCharPtr),
-		AllTypes.Text.NOT_EQ(String("Text")),
+		AllTypes.Text.NOT_EQ(Text("Text")),
 		AllTypes.Text.GT(AllTypes.Text),
-		AllTypes.Text.GT(String("Text")),
+		AllTypes.Text.GT(Text("Text")),
 		AllTypes.Text.GT_EQ(AllTypes.TextPtr),
-		AllTypes.Text.GT_EQ(String("Text")),
+		AllTypes.Text.GT_EQ(Text("Text")),
 		AllTypes.Text.LT(AllTypes.Char),
-		AllTypes.Text.LT(String("Text")),
+		AllTypes.Text.LT(Text("Text")),
 		AllTypes.Text.LT_EQ(AllTypes.VarChar),
 		AllTypes.Text.LT_EQ(String("Text")),
 		AllTypes.Text.BETWEEN(String("min"), String("max")),
@@ -378,13 +490,13 @@ func TestStringOperators(t *testing.T) {
 		OCTET_LENGTH(AllTypes.Text),
 		OCTET_LENGTH(String("length")),
 		LOWER(AllTypes.VarCharPtr),
-		LOWER(String("length")),
+		LOWER(Char(4)("length")),
 		UPPER(AllTypes.Char),
-		UPPER(String("upper")),
+		UPPER(VarChar()("upper")),
 		BTRIM(AllTypes.VarChar),
-		BTRIM(String("btrim")),
+		BTRIM(Char()("btrim")),
 		BTRIM(AllTypes.VarChar, String("AA")),
-		BTRIM(String("btrim"), String("AA")),
+		BTRIM(VarChar(11)("btrim"), String("AA")),
 		LTRIM(AllTypes.VarChar),
 		LTRIM(String("ltrim")),
 		LTRIM(AllTypes.VarChar, String("A")),
@@ -395,18 +507,18 @@ func TestStringOperators(t *testing.T) {
 		CONCAT(AllTypes.VarCharPtr, AllTypes.VarCharPtr, String("aaa"), Int(1)),
 		CONCAT(Bool(false), Int(1), Float(22.2), String("test test")),
 		CONCAT_WS(String("string1"), Int(1), Float(11.22), String("bytea"), Bool(false)), //Float(11.12)),
-		CONVERT(String("bytea"), String("UTF8"), String("LATIN1")),
+		CONVERT(Bytea("bytea"), String("UTF8"), String("LATIN1")),
 		CONVERT(AllTypes.Bytea, String("UTF8"), String("LATIN1")),
-		CONVERT_FROM(String("text_in_utf8"), String("UTF8")),
+		CONVERT_FROM(Bytea("text_in_utf8"), String("UTF8")),
 		CONVERT_TO(String("text_in_utf8"), String("UTF8")),
-		ENCODE(String("123\000\001"), String("base64")),
+		ENCODE(Bytea("123\000\001"), String("base64")),
 		DECODE(String("MTIzAAE="), String("base64")),
 		FORMAT(String("Hello %s, %1$s"), String("World")),
 		INITCAP(String("hi THOMAS")),
 		LEFT(String("abcde"), Int(2)),
 		RIGHT(String("abcde"), Int(2)),
-		LENGTH(String("jose")),
-		LENGTH(String("jose"), String("UTF8")),
+		LENGTH(Bytea("jose")),
+		LENGTH(Bytea("jose"), String("UTF8")),
 		LPAD(String("Hi"), Int(5)),
 		LPAD(String("Hi"), Int(5), String("xy")),
 		RPAD(String("Hi"), Int(5)),
@@ -421,9 +533,7 @@ func TestStringOperators(t *testing.T) {
 		TO_HEX(AllTypes.IntegerPtr),
 	)
 
-	//fmt.Println(query.DebugSql())
-
-	dest := []struct{}{}
+	var dest []struct{}
 	err := query.Query(db, &dest)
 
 	require.NoError(t, err)
@@ -501,6 +611,8 @@ LIMIT $5;
 }
 
 func TestFloatOperators(t *testing.T) {
+	skipForCockroachDB(t) // some functions are still unimplemented
+
 	query := AllTypes.SELECT(
 		AllTypes.Numeric.EQ(AllTypes.Numeric).AS("eq1"),
 		AllTypes.Decimal.EQ(Float(12.22)).AS("eq2"),
@@ -518,9 +630,9 @@ func TestFloatOperators(t *testing.T) {
 		AllTypes.Numeric.BETWEEN(Float(1.34), AllTypes.Decimal).AS("between"),
 		AllTypes.Numeric.NOT_BETWEEN(AllTypes.Decimal.MUL(Float(3)), Float(100.12)).AS("not_between"),
 
-		TRUNC(AllTypes.Decimal.ADD(AllTypes.Decimal), Uint8(2)).AS("add1"),
+		TRUNC(AllTypes.Decimal.ADD(AllTypes.Decimal), Int8(2)).AS("add1"),
 		TRUNC(AllTypes.Decimal.ADD(Float(11.22)), Int8(2)).AS("add2"),
-		TRUNC(AllTypes.Decimal.SUB(AllTypes.DecimalPtr), Uint16(2)).AS("sub1"),
+		TRUNC(AllTypes.Decimal.SUB(AllTypes.DecimalPtr), Int32(2)).AS("sub1"),
 		TRUNC(AllTypes.Decimal.SUB(Float(11.22)), Int16(2)).AS("sub2"),
 		TRUNC(AllTypes.Decimal.MUL(AllTypes.DecimalPtr), Int16(2)).AS("mul1"),
 		TRUNC(AllTypes.Decimal.MUL(Float(11.22)), Int32(2)).AS("mul2"),
@@ -604,6 +716,8 @@ LIMIT $38;
 }
 
 func TestIntegerOperators(t *testing.T) {
+	skipForCockroachDB(t) // some functions are still unimplemented
+
 	query := AllTypes.SELECT(
 		AllTypes.BigInt,
 		AllTypes.BigIntPtr,
@@ -622,13 +736,13 @@ func TestIntegerOperators(t *testing.T) {
 		AllTypes.Integer.BETWEEN(Int(11), Int(200)).AS("between"),
 		AllTypes.Integer.NOT_BETWEEN(Int(66), Int(77)).AS("not_between"),
 		AllTypes.BigInt.LT(AllTypes.BigIntPtr).AS("lt1"),
-		AllTypes.BigInt.LT(Uint8(65)).AS("lt2"),
+		AllTypes.BigInt.LT(Int16(65)).AS("lt2"),
 		AllTypes.BigInt.LT_EQ(AllTypes.BigIntPtr).AS("lte1"),
-		AllTypes.BigInt.LT_EQ(Uint16(65)).AS("lte2"),
+		AllTypes.BigInt.LT_EQ(Int32(65)).AS("lte2"),
 		AllTypes.BigInt.GT(AllTypes.BigIntPtr).AS("gt1"),
-		AllTypes.BigInt.GT(Uint32(65)).AS("gt2"),
+		AllTypes.BigInt.GT(Int64(65)).AS("gt2"),
 		AllTypes.BigInt.GT_EQ(AllTypes.BigIntPtr).AS("gte1"),
-		AllTypes.BigInt.GT_EQ(Uint64(65)).AS("gte2"),
+		AllTypes.BigInt.GT_EQ(Int64(65)).AS("gte2"),
 
 		AllTypes.BigInt.ADD(AllTypes.BigInt).AS("add1"),
 		AllTypes.BigInt.ADD(Int(11)).AS("add2"),
@@ -733,6 +847,8 @@ LIMIT $27;
 }
 
 func TestTimeExpression(t *testing.T) {
+	skipForCockroachDB(t)
+
 	query := AllTypes.SELECT(
 		AllTypes.Time.EQ(AllTypes.Time),
 		AllTypes.Time.EQ(Time(23, 6, 6, 1)),
@@ -804,15 +920,79 @@ func TestTimeExpression(t *testing.T) {
 		NOW(),
 	)
 
-	//fmt.Println(query.DebugSql())
+	// fmt.Println(query.DebugSql())
 
-	dest := []struct{}{}
+	var dest []struct{}
 	err := query.Query(db, &dest)
 
 	require.NoError(t, err)
 }
 
+func TestIntervalSetFunctionality(t *testing.T) {
+
+	t.Run("updateQueryIntervalTest", func(t *testing.T) {
+
+		expectedQuery := `
+UPDATE test_sample.employee
+SET pto_accrual = INTERVAL '3 HOUR'
+WHERE employee.employee_id = $1
+RETURNING employee.employee_id AS "employee.employee_id",
+          employee.first_name AS "employee.first_name",
+          employee.last_name AS "employee.last_name",
+          employee.employment_date AS "employee.employment_date",
+          employee.manager_id AS "employee.manager_id",
+          employee.pto_accrual AS "employee.pto_accrual";
+`
+		testutils.ExecuteInTxAndRollback(t, db, func(tx qrm.DB) {
+			var windy model.Employee
+			windy.PtoAccrual = ptr.Of("3h")
+			stmt := Employee.UPDATE(Employee.PtoAccrual).SET(
+				Employee.PtoAccrual.SET(INTERVAL(3, HOUR)),
+			).WHERE(Employee.EmployeeID.EQ(Int(1))).RETURNING(Employee.AllColumns)
+
+			testutils.AssertStatementSql(t, stmt, expectedQuery)
+			err := stmt.Query(tx, &windy)
+			assert.Nil(t, err)
+			assert.Equal(t, *windy.PtoAccrual, "03:00:00")
+
+		})
+	})
+
+	t.Run("upsertQueryIntervalTest", func(t *testing.T) {
+		expectedQuery := `
+INSERT INTO test_sample.employee (employee_id, first_name, last_name, employment_date, manager_id, pto_accrual)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (employee_id) DO UPDATE
+       SET pto_accrual = excluded.pto_accrual
+RETURNING employee.employee_id AS "employee.employee_id",
+          employee.first_name AS "employee.first_name",
+          employee.last_name AS "employee.last_name",
+          employee.employment_date AS "employee.employment_date",
+          employee.manager_id AS "employee.manager_id",
+          employee.pto_accrual AS "employee.pto_accrual";
+`
+		testutils.ExecuteInTxAndRollback(t, db, func(tx qrm.DB) {
+			var employee model.Employee
+			employee.PtoAccrual = ptr.Of("5h")
+			stmt := Employee.INSERT(Employee.AllColumns).
+				MODEL(employee).
+				ON_CONFLICT(Employee.EmployeeID).
+				DO_UPDATE(SET(
+					Employee.PtoAccrual.SET(Employee.EXCLUDED.PtoAccrual),
+				)).RETURNING(Employee.AllColumns)
+
+			testutils.AssertStatementSql(t, stmt, expectedQuery)
+			err := stmt.Query(tx, &employee)
+			assert.Nil(t, err)
+			assert.Equal(t, *employee.PtoAccrual, "05:00:00")
+
+		})
+	})
+}
+
 func TestInterval(t *testing.T) {
+	skipForCockroachDB(t)
+
 	stmt := SELECT(
 		INTERVAL(1, YEAR),
 		INTERVAL(1, MONTH),
@@ -864,6 +1044,106 @@ func TestInterval(t *testing.T) {
 	err := stmt.Query(db, &struct{}{})
 	require.NoError(t, err)
 	requireLogged(t, stmt)
+}
+
+func TestTimeEXTRACT(t *testing.T) {
+	stmt := SELECT(
+		EXTRACT(CENTURY, AllTypes.Timestampz),
+		EXTRACT(DAY, AllTypes.Timestamp),
+		EXTRACT(DECADE, AllTypes.Date),
+		EXTRACT(DOW, AllTypes.TimestampzPtr),
+		EXTRACT(DOY, DateT(time.Now())),
+		EXTRACT(EPOCH, TimestampT(time.Now())),
+		EXTRACT(HOUR, AllTypes.Time.ADD(INTERVAL(1, HOUR))),
+		EXTRACT(ISODOW, AllTypes.Timestampz),
+		EXTRACT(ISOYEAR, AllTypes.Timestampz),
+		EXTRACT(JULIAN, AllTypes.Timestampz).EQ(Float(3456.123)),
+		EXTRACT(MICROSECOND, AllTypes.Timestampz),
+		EXTRACT(MILLENNIUM, AllTypes.Timestampz),
+		EXTRACT(MILLISECOND, AllTypes.Timez),
+		EXTRACT(MINUTE, INTERVAL(1, HOUR, 2, MINUTE)),
+		EXTRACT(MONTH, AllTypes.Timestampz),
+		EXTRACT(QUARTER, AllTypes.Timestampz),
+		EXTRACT(SECOND, AllTypes.Timestampz),
+		EXTRACT(TIMEZONE, AllTypes.Timestampz),
+		EXTRACT(TIMEZONE_HOUR, AllTypes.Timestampz),
+		EXTRACT(TIMEZONE_MINUTE, AllTypes.Timestampz),
+		EXTRACT(WEEK, AllTypes.Timestampz),
+		EXTRACT(YEAR, AllTypes.Timestampz),
+	).FROM(
+		AllTypes,
+	)
+
+	// fmt.Println(stmt.Sql())
+
+	testutils.AssertStatementSql(t, stmt, `
+SELECT EXTRACT(CENTURY FROM all_types.timestampz),
+     EXTRACT(DAY FROM all_types.timestamp),
+     EXTRACT(DECADE FROM all_types.date),
+     EXTRACT(DOW FROM all_types.timestampz_ptr),
+     EXTRACT(DOY FROM $1::date),
+     EXTRACT(EPOCH FROM $2::timestamp without time zone),
+     EXTRACT(HOUR FROM all_types.time + INTERVAL '1 HOUR'),
+     EXTRACT(ISODOW FROM all_types.timestampz),
+     EXTRACT(ISOYEAR FROM all_types.timestampz),
+     EXTRACT(JULIAN FROM all_types.timestampz) = $3,
+     EXTRACT(MICROSECOND FROM all_types.timestampz),
+     EXTRACT(MILLENNIUM FROM all_types.timestampz),
+     EXTRACT(MILLISECOND FROM all_types.timez),
+     EXTRACT(MINUTE FROM INTERVAL '1 HOUR 2 MINUTE'),
+     EXTRACT(MONTH FROM all_types.timestampz),
+     EXTRACT(QUARTER FROM all_types.timestampz),
+     EXTRACT(SECOND FROM all_types.timestampz),
+     EXTRACT(TIMEZONE FROM all_types.timestampz),
+     EXTRACT(TIMEZONE_HOUR FROM all_types.timestampz),
+     EXTRACT(TIMEZONE_MINUTE FROM all_types.timestampz),
+     EXTRACT(WEEK FROM all_types.timestampz),
+     EXTRACT(YEAR FROM all_types.timestampz)
+FROM test_sample.all_types;
+`)
+
+	err := stmt.Query(db, &struct{}{})
+	require.NoError(t, err)
+}
+
+func TestRowExpression(t *testing.T) {
+	now := time.Now()
+	nowAddHour := time.Now().Add(time.Hour)
+
+	stmt := SELECT(
+		ROW(Int32(1), Real(11.22), Text("john")).AS("row"),
+		WRAP(Int64(1), Double(11.22), VarChar(10)("john")).AS("wrap"),
+
+		ROW(Bool(false), DateT(now)).EQ(ROW(Bool(true), DateT(now))),
+		WRAP(Bool(false), DateT(now)).NOT_EQ(WRAP(Bool(true), DateT(now))),
+
+		ROW(TimeT(nowAddHour)).IS_DISTINCT_FROM(RowExp(Raw("row(NOW()::time)"))),
+		ROW().IS_NOT_DISTINCT_FROM(ROW()),
+
+		ROW(TimestampT(now), TimestampzT(nowAddHour)).GT(WRAP(TimestampT(now), TimestampzT(now))),
+		ROW(TimestampzT(nowAddHour)).GT_EQ(ROW(TimestampzT(now))),
+		WRAP(TimestampT(now), TimestampzT(nowAddHour)).LT(ROW(TimestampT(now), TimestampzT(now))),
+		ROW(TimestampzT(nowAddHour)).LT_EQ(ROW(TimestampzT(now))),
+	)
+
+	//fmt.Println(stmt.Sql())
+	//fmt.Println(stmt.DebugSql())
+
+	testutils.AssertStatementSql(t, stmt, `
+SELECT ROW($1::integer, $2::real, $3::text) AS "row",
+     ($4::bigint, $5::double precision, $6::varchar(10)) AS "wrap",
+     ROW($7::boolean, $8::date) = ROW($9::boolean, $10::date),
+     ($11::boolean, $12::date) != ($13::boolean, $14::date),
+     ROW($15::time without time zone) IS DISTINCT FROM (row(NOW()::time)),
+     ROW() IS NOT DISTINCT FROM ROW(),
+     ROW($16::timestamp without time zone, $17::timestamp with time zone) > ($18::timestamp without time zone, $19::timestamp with time zone),
+     ROW($20::timestamp with time zone) >= ROW($21::timestamp with time zone),
+     ($22::timestamp without time zone, $23::timestamp with time zone) < ROW($24::timestamp without time zone, $25::timestamp with time zone),
+     ROW($26::timestamp with time zone) <= ROW($27::timestamp with time zone);
+`)
+
+	err := stmt.Query(db, &struct{}{})
+	require.NoError(t, err)
 }
 
 func TestSubQueryColumnReference(t *testing.T) {
@@ -1084,6 +1364,10 @@ LIMIT $6;
 	dest.Timez = dest.Timez.UTC()
 	dest.Timestampz = dest.Timestampz.UTC()
 
+	if sourceIsCockroachDB() {
+		return // rounding differences
+	}
+
 	testutils.AssertJSON(t, dest, `
 {
 	"Date": "2009-11-17T00:00:00Z",
@@ -1096,33 +1380,57 @@ LIMIT $6;
 	requireLogged(t, query)
 }
 
+func TestJsonLiteral(t *testing.T) {
+	stmt := AllTypes.UPDATE().
+		SET(AllTypes.JSON.SET(Json(`{"firstName": "John", "lastName": "Doe"}`))).
+		WHERE(AllTypes.SmallInt.EQ(Int(14))).
+		RETURNING(AllTypes.JSON)
+
+	testutils.AssertDebugStatementSql(t, stmt, `
+UPDATE test_sample.all_types
+SET json = '{"firstName": "John", "lastName": "Doe"}'::json
+WHERE all_types.small_int = 14
+RETURNING all_types.json AS "all_types.json";
+`)
+
+	testutils.ExecuteInTxAndRollback(t, db, func(tx qrm.DB) {
+		var res model.AllTypes
+
+		err := stmt.Query(tx, &res)
+		require.NoError(t, err)
+		require.Equal(t, res.JSON, `{"firstName": "John", "lastName": "Doe"}`)
+	})
+}
+
+var moodSad = model.Mood_Sad
+
 var allTypesRow0 = model.AllTypes{
-	SmallIntPtr:        testutils.Int16Ptr(14),
+	SmallIntPtr:        ptr.Of(int16(14)),
 	SmallInt:           14,
-	IntegerPtr:         testutils.Int32Ptr(300),
+	IntegerPtr:         ptr.Of(int32(300)),
 	Integer:            300,
-	BigIntPtr:          testutils.Int64Ptr(50000),
+	BigIntPtr:          ptr.Of(int64(50000)),
 	BigInt:             5000,
-	DecimalPtr:         testutils.Float64Ptr(1.11),
+	DecimalPtr:         ptr.Of(1.11),
 	Decimal:            1.11,
-	NumericPtr:         testutils.Float64Ptr(2.22),
+	NumericPtr:         ptr.Of(2.22),
 	Numeric:            2.22,
-	RealPtr:            testutils.Float32Ptr(5.55),
+	RealPtr:            ptr.Of(float32(5.55)),
 	Real:               5.55,
-	DoublePrecisionPtr: testutils.Float64Ptr(11111111.22),
+	DoublePrecisionPtr: ptr.Of(11111111.22),
 	DoublePrecision:    11111111.22,
 	Smallserial:        1,
 	Serial:             1,
 	Bigserial:          1,
 	//MoneyPtr: nil,
 	//Money:
-	VarCharPtr:           testutils.StringPtr("ABBA"),
+	VarCharPtr:           ptr.Of("ABBA"),
 	VarChar:              "ABBA",
-	CharPtr:              testutils.StringPtr("JOHN                                                                            "),
+	CharPtr:              ptr.Of("JOHN                                                                            "),
 	Char:                 "JOHN                                                                            ",
-	TextPtr:              testutils.StringPtr("Some text"),
+	TextPtr:              ptr.Of("Some text"),
 	Text:                 "Some text",
-	ByteaPtr:             testutils.ByteArrayPtr([]byte("bytea")),
+	ByteaPtr:             ptr.Of([]byte("bytea")),
 	Bytea:                []byte("bytea"),
 	TimestampzPtr:        testutils.TimestampWithTimeZone("1999-01-08 13:05:06 +0100 CET", 0),
 	Timestampz:           *testutils.TimestampWithTimeZone("1999-01-08 13:05:06 +0100 CET", 0),
@@ -1134,32 +1442,34 @@ var allTypesRow0 = model.AllTypes{
 	Timez:                *testutils.TimeWithTimeZone("04:05:06 -0800"),
 	TimePtr:              testutils.TimeWithoutTimeZone("04:05:06"),
 	Time:                 *testutils.TimeWithoutTimeZone("04:05:06"),
-	IntervalPtr:          testutils.StringPtr("3 days 04:05:06"),
+	IntervalPtr:          ptr.Of("3 days 04:05:06"),
 	Interval:             "3 days 04:05:06",
-	BooleanPtr:           testutils.BoolPtr(true),
+	BooleanPtr:           ptr.Of(true),
 	Boolean:              false,
-	PointPtr:             testutils.StringPtr("(2,3)"),
-	BitPtr:               testutils.StringPtr("101"),
+	PointPtr:             ptr.Of("(2,3)"),
+	BitPtr:               ptr.Of("101"),
 	Bit:                  "101",
-	BitVaryingPtr:        testutils.StringPtr("101111"),
+	BitVaryingPtr:        ptr.Of("101111"),
 	BitVarying:           "101111",
-	TsvectorPtr:          testutils.StringPtr("'supernova':1"),
+	TsvectorPtr:          ptr.Of("'supernova':1"),
 	Tsvector:             "'supernova':1",
 	UUIDPtr:              testutils.UUIDPtr("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"),
 	UUID:                 uuid.MustParse("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"),
-	XMLPtr:               testutils.StringPtr("<Sub>abc</Sub>"),
+	XMLPtr:               ptr.Of("<Sub>abc</Sub>"),
 	XML:                  "<Sub>abc</Sub>",
-	JSONPtr:              testutils.StringPtr(`{"a": 1, "b": 3}`),
+	JSONPtr:              ptr.Of(`{"a": 1, "b": 3}`),
 	JSON:                 `{"a": 1, "b": 3}`,
-	JsonbPtr:             testutils.StringPtr(`{"a": 1, "b": 3}`),
+	JsonbPtr:             ptr.Of(`{"a": 1, "b": 3}`),
 	Jsonb:                `{"a": 1, "b": 3}`,
-	IntegerArrayPtr:      testutils.StringPtr("{1,2,3}"),
+	IntegerArrayPtr:      ptr.Of("{1,2,3}"),
 	IntegerArray:         "{1,2,3}",
-	TextArrayPtr:         testutils.StringPtr("{breakfast,consulting}"),
+	TextArrayPtr:         ptr.Of("{breakfast,consulting}"),
 	TextArray:            "{breakfast,consulting}",
 	JsonbArray:           `{"{\"a\": 1, \"b\": 2}","{\"a\": 3, \"b\": 4}"}`,
-	TextMultiDimArrayPtr: testutils.StringPtr("{{meeting,lunch},{training,presentation}}"),
+	TextMultiDimArrayPtr: ptr.Of("{{meeting,lunch},{training,presentation}}"),
 	TextMultiDimArray:    "{{meeting,lunch},{training,presentation}}",
+	MoodPtr:              &moodSad,
+	Mood:                 model.Mood_Happy,
 }
 
 var allTypesRow1 = model.AllTypes{
@@ -1226,4 +1536,136 @@ var allTypesRow1 = model.AllTypes{
 	JsonbArray:           `{"{\"a\": 1, \"b\": 2}","{\"a\": 3, \"b\": 4}"}`,
 	TextMultiDimArrayPtr: nil,
 	TextMultiDimArray:    "{{meeting,lunch},{training,presentation}}",
+	MoodPtr:              nil,
+	Mood:                 model.Mood_Ok,
+}
+
+func TestAliasedDuplicateSliceSubType(t *testing.T) {
+
+	children := Components.AS("children")
+	childrenVulnerabilities := Vulnerabilities.AS("children_vulnerabilities")
+
+	stmt := SELECT(
+		Components.AllColumns,
+		Vulnerabilities.AllColumns,
+		children.AllColumns,
+		childrenVulnerabilities.AllColumns,
+	).FROM(
+		Components.
+			LEFT_JOIN(Vulnerabilities, Vulnerabilities.ComponentsID.EQ(Components.ID)).
+			LEFT_JOIN(children, children.ParentID.EQ(Components.ID)).
+			LEFT_JOIN(childrenVulnerabilities, childrenVulnerabilities.ComponentsID.EQ(children.ID)),
+	).ORDER_BY(
+		Components.ID,
+		Vulnerabilities.ID,
+		children.ID,
+		childrenVulnerabilities.ID,
+	)
+
+	testutils.AssertDebugStatementSql(t, stmt, `
+SELECT components.id AS "components.id",
+     components.parent_id AS "components.parent_id",
+     vulnerabilities.id AS "vulnerabilities.id",
+     vulnerabilities.components_id AS "vulnerabilities.components_id",
+     children.id AS "children.id",
+     children.parent_id AS "children.parent_id",
+     children_vulnerabilities.id AS "children_vulnerabilities.id",
+     children_vulnerabilities.components_id AS "children_vulnerabilities.components_id"
+FROM test_sample.components
+     LEFT JOIN test_sample.vulnerabilities ON (vulnerabilities.components_id = components.id)
+     LEFT JOIN test_sample.components AS children ON (children.parent_id = components.id)
+     LEFT JOIN test_sample.vulnerabilities AS children_vulnerabilities ON (children_vulnerabilities.components_id = children.id)
+ORDER BY components.id, vulnerabilities.id, children.id, children_vulnerabilities.id;
+`)
+
+	var dest []struct {
+		model.Components
+		Vulnerabilities []model.Vulnerabilities
+		Children        []struct {
+			model.Components `alias:"children"`
+			Vulnerabilities  []model.Vulnerabilities `alias:"children_vulnerabilities"`
+		}
+	}
+
+	err := stmt.Query(db, &dest)
+	require.NoError(t, err)
+
+	testutils.AssertJSON(t, dest, `
+[
+	{
+		"ID": "component_00",
+		"ParentID": null,
+		"Vulnerabilities": [
+			{
+				"ID": "vulnerability_00",
+				"ComponentsID": "component_00"
+			},
+			{
+				"ID": "vulnerability_01",
+				"ComponentsID": "component_00"
+			},
+			{
+				"ID": "vulnerability_02",
+				"ComponentsID": "component_00"
+			},
+			{
+				"ID": "vulnerability_03",
+				"ComponentsID": "component_00"
+			}
+		],
+		"Children": [
+			{
+				"ID": "component_01",
+				"ParentID": "component_00",
+				"Vulnerabilities": [
+					{
+						"ID": "vulnerability_11",
+						"ComponentsID": "component_01"
+					},
+					{
+						"ID": "vulnerability_12",
+						"ComponentsID": "component_01"
+					}
+				]
+			},
+			{
+				"ID": "component_02",
+				"ParentID": "component_00",
+				"Vulnerabilities": [
+					{
+						"ID": "vulnerability_21",
+						"ComponentsID": "component_02"
+					}
+				]
+			}
+		]
+	},
+	{
+		"ID": "component_01",
+		"ParentID": "component_00",
+		"Vulnerabilities": [
+			{
+				"ID": "vulnerability_11",
+				"ComponentsID": "component_01"
+			},
+			{
+				"ID": "vulnerability_12",
+				"ComponentsID": "component_01"
+			}
+		],
+		"Children": null
+	},
+	{
+		"ID": "component_02",
+		"ParentID": "component_00",
+		"Vulnerabilities": [
+			{
+				"ID": "vulnerability_21",
+				"ComponentsID": "component_02"
+			}
+		],
+		"Children": null
+	}
+]
+`)
 }

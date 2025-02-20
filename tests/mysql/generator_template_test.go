@@ -7,23 +7,23 @@ import (
 	mysql2 "github.com/go-jet/jet/v2/generator/mysql"
 	"github.com/go-jet/jet/v2/generator/template"
 	"github.com/go-jet/jet/v2/internal/3rdparty/snaker"
-	"github.com/go-jet/jet/v2/internal/utils"
+	"github.com/go-jet/jet/v2/internal/utils/dbidentifier"
 	postgres2 "github.com/go-jet/jet/v2/postgres"
 	"github.com/go-jet/jet/v2/tests/dbconfig"
 	file2 "github.com/go-jet/jet/v2/tests/internal/utils/file"
 	"github.com/stretchr/testify/require"
-	"path"
+	"path/filepath"
 	"testing"
 )
 
 const tempTestDir = "./.tempTestDir"
 
-var defaultModelPath = path.Join(tempTestDir, "dvds/model")
-var defaultActorModelFilePath = path.Join(tempTestDir, "dvds/model", "actor.go")
-var defaultTableSQLBuilderFilePath = path.Join(tempTestDir, "dvds/table")
-var defaultViewSQLBuilderFilePath = path.Join(tempTestDir, "dvds/view")
-var defaultEnumSQLBuilderFilePath = path.Join(tempTestDir, "dvds/enum")
-var defaultActorSQLBuilderFilePath = path.Join(tempTestDir, "dvds/table", "actor.go")
+var defaultModelPath = filepath.Join(tempTestDir, "dvds/model")
+var defaultActorModelFilePath = filepath.Join(tempTestDir, "dvds/model", "actor.go")
+var defaultTableSQLBuilderFilePath = filepath.Join(tempTestDir, "dvds/table")
+var defaultViewSQLBuilderFilePath = filepath.Join(tempTestDir, "dvds/view")
+var defaultEnumSQLBuilderFilePath = filepath.Join(tempTestDir, "dvds/enum")
+var defaultActorSQLBuilderFilePath = filepath.Join(tempTestDir, "dvds/table", "actor.go")
 
 func dbConnection(dbName string) mysql2.DBConnection {
 	if sourceIsMariaDB() {
@@ -157,17 +157,17 @@ func TestGeneratorTemplate_Model_RenameFilesAndTypes(t *testing.T) {
 						UseTable(func(table metadata.Table) template.TableModel {
 							return template.DefaultTableModel(table).
 								UseFileName(schemaMetaData.Name + "_" + table.Name).
-								UseTypeName(utils.ToGoIdentifier(table.Name) + "Table")
+								UseTypeName(dbidentifier.ToGoIdentifier(table.Name) + "Table")
 						}).
 						UseView(func(table metadata.Table) template.ViewModel {
 							return template.DefaultViewModel(table).
 								UseFileName(schemaMetaData.Name + "_" + table.Name + "_view").
-								UseTypeName(utils.ToGoIdentifier(table.Name) + "View")
+								UseTypeName(dbidentifier.ToGoIdentifier(table.Name) + "View")
 						}).
 						UseEnum(func(enumMetaData metadata.Enum) template.EnumModel {
 							return template.DefaultEnumModel(enumMetaData).
 								UseFileName(enumMetaData.Name + "_enum").
-								UseTypeName(utils.ToGoIdentifier(enumMetaData.Name) + "Enum")
+								UseTypeName(dbidentifier.ToGoIdentifier(enumMetaData.Name) + "Enum")
 						}),
 					)
 			}),
@@ -256,19 +256,19 @@ func TestGeneratorTemplate_SQLBuilder_ChangeTypeAndFileName(t *testing.T) {
 						UseTable(func(table metadata.Table) template.TableSQLBuilder {
 							return template.DefaultTableSQLBuilder(table).
 								UseFileName(schemaMetaData.Name + "_" + table.Name + "_table").
-								UseTypeName(utils.ToGoIdentifier(table.Name) + "TableSQLBuilder").
-								UseInstanceName("T_" + utils.ToGoIdentifier(table.Name))
+								UseTypeName(dbidentifier.ToGoIdentifier(table.Name) + "TableSQLBuilder").
+								UseInstanceName("T_" + dbidentifier.ToGoIdentifier(table.Name))
 						}).
 						UseView(func(table metadata.Table) template.ViewSQLBuilder {
 							return template.DefaultViewSQLBuilder(table).
 								UseFileName(schemaMetaData.Name + "_" + table.Name + "_view").
-								UseTypeName(utils.ToGoIdentifier(table.Name) + "ViewSQLBuilder").
-								UseInstanceName("V_" + utils.ToGoIdentifier(table.Name))
+								UseTypeName(dbidentifier.ToGoIdentifier(table.Name) + "ViewSQLBuilder").
+								UseInstanceName("V_" + dbidentifier.ToGoIdentifier(table.Name))
 						}).
 						UseEnum(func(enum metadata.Enum) template.EnumSQLBuilder {
 							return template.DefaultEnumSQLBuilder(enum).
 								UseFileName(schemaMetaData.Name + "_" + enum.Name + "_enum").
-								UseInstanceName(utils.ToGoIdentifier(enum.Name) + "EnumSQLBuilder")
+								UseInstanceName(dbidentifier.ToGoIdentifier(enum.Name) + "EnumSQLBuilder")
 						}),
 					)
 			}),
@@ -283,6 +283,29 @@ func TestGeneratorTemplate_SQLBuilder_ChangeTypeAndFileName(t *testing.T) {
 	require.Contains(t, actorInfo, "var V_ActorInfo = newActorInfoViewSQLBuilder(\"dvds\", \"actor_info\", \"\")")
 	mpaaRating := file2.Exists(t, defaultEnumSQLBuilderFilePath, "dvds_film_rating_enum.go")
 	require.Contains(t, mpaaRating, "var FilmRatingEnumSQLBuilder = &struct {")
+}
+
+func TestGeneratorTemplate_SQLBuilder_DefaultAlias(t *testing.T) {
+	err := mysql2.Generate(
+		tempTestDir,
+		dbConnection("dvds"),
+		template.Default(postgres2.Dialect).
+			UseSchema(func(schemaMetaData metadata.Schema) template.Schema {
+				return template.DefaultSchema(schemaMetaData).
+					UseSQLBuilder(template.DefaultSQLBuilder().
+						UseTable(func(table metadata.Table) template.TableSQLBuilder {
+							if table.Name == "actor" {
+								return template.DefaultTableSQLBuilder(table).UseDefaultAlias("actors")
+							}
+							return template.DefaultTableSQLBuilder(table)
+						}),
+					)
+			}),
+	)
+	require.Nil(t, err)
+
+	actor := file2.Exists(t, defaultTableSQLBuilderFilePath, "actor.go")
+	require.Contains(t, actor, "var Actor = newActorTable(\"dvds\", \"actor\", \"actors\")")
 }
 
 func TestGeneratorTemplate_Model_AddTags(t *testing.T) {

@@ -118,7 +118,7 @@ func Uint64(value uint64) IntegerExpression {
 	return intLiteral(value)
 }
 
-//---------------------------------------------------//
+// ---------------------------------------------------//
 type boolLiteralExpression struct {
 	boolInterfaceImpl
 	literalExpressionImpl
@@ -134,7 +134,7 @@ func Bool(value bool) BoolExpression {
 	return &boolLiteralExpression
 }
 
-//---------------------------------------------------//
+// ---------------------------------------------------//
 type floatLiteral struct {
 	floatInterfaceImpl
 	literalExpressionImpl
@@ -160,7 +160,7 @@ func Decimal(value string) FloatExpression {
 	return &floatLiteral
 }
 
-//---------------------------------------------------//
+// ---------------------------------------------------//
 type stringLiteral struct {
 	stringInterfaceImpl
 	literalExpressionImpl
@@ -333,6 +333,10 @@ var (
 	NULL = newNullLiteral()
 	// STAR is jet equivalent of SQL *
 	STAR = newStarLiteral()
+	// PLUS_INFINITY is jet equivalent for sql infinity
+	PLUS_INFINITY = String("infinity")
+	// MINUS_INFINITY is jet equivalent for sql -infinity
+	MINUS_INFINITY = String("-infinity")
 )
 
 type nullLiteral struct {
@@ -351,7 +355,7 @@ func (n *nullLiteral) serialize(statement StatementType, out *SQLBuilder, option
 	out.WriteString("NULL")
 }
 
-//--------------------------------------------------//
+// --------------------------------------------------//
 type starLiteral struct {
 	ExpressionInterfaceImpl
 }
@@ -366,32 +370,6 @@ func newStarLiteral() Expression {
 
 func (n *starLiteral) serialize(statement StatementType, out *SQLBuilder, options ...SerializeOption) {
 	out.WriteString("*")
-}
-
-//---------------------------------------------------//
-
-type wrap struct {
-	ExpressionInterfaceImpl
-	expressions []Expression
-}
-
-func (n *wrap) serialize(statementType StatementType, out *SQLBuilder, options ...SerializeOption) {
-	out.WriteString("(")
-
-	if len(n.expressions) == 1 {
-		options = append(options, NoWrap, Ident)
-	}
-	serializeExpressionList(statementType, n.expressions, ", ", out, options...)
-
-	out.WriteString(")")
-}
-
-// WRAP wraps list of expressions with brackets '(' and ')'
-func WRAP(expression ...Expression) Expression {
-	wrap := &wrap{expressions: expression}
-	wrap.ExpressionInterfaceImpl.Parent = wrap
-
-	return wrap
 }
 
 //---------------------------------------------------//
@@ -445,6 +423,11 @@ func RawWithParent(raw string, parent ...Expression) Expression {
 	return rawExp
 }
 
+// RawBool helper that for raw string boolean expressions
+func RawBool(raw string, namedArgs ...map[string]interface{}) BoolExpression {
+	return BoolExp(Raw(raw, namedArgs...))
+}
+
 // RawInt helper that for integer expressions
 func RawInt(raw string, namedArgs ...map[string]interface{}) IntegerExpression {
 	return IntExp(Raw(raw, namedArgs...))
@@ -483,6 +466,11 @@ func RawTimestampz(raw string, namedArgs ...map[string]interface{}) TimestampzEx
 // RawDate helper that for date expressions
 func RawDate(raw string, namedArgs ...map[string]interface{}) DateExpression {
 	return DateExp(Raw(raw, namedArgs...))
+}
+
+// RawRange helper that for range expressions
+func RawRange[T Expression](raw string, namedArgs ...map[string]interface{}) Range[T] {
+	return RangeExp[T](Raw(raw, namedArgs...))
 }
 
 // UUID is a helper function to create string literal expression from uuid object

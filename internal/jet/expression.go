@@ -51,12 +51,12 @@ func (e *ExpressionInterfaceImpl) IS_NOT_NULL() BoolExpression {
 
 // IN checks if this expressions matches any in expressions list
 func (e *ExpressionInterfaceImpl) IN(expressions ...Expression) BoolExpression {
-	return newBinaryBoolOperatorExpression(e.Parent, WRAP(expressions...), "IN")
+	return newBinaryBoolOperatorExpression(e.Parent, wrap(expressions...), "IN")
 }
 
 // NOT_IN checks if this expressions is different of all expressions in expressions list
 func (e *ExpressionInterfaceImpl) NOT_IN(expressions ...Expression) BoolExpression {
-	return newBinaryBoolOperatorExpression(e.Parent, WRAP(expressions...), "NOT IN")
+	return newBinaryBoolOperatorExpression(e.Parent, wrap(expressions...), "NOT IN")
 }
 
 // AS the temporary alias name to assign to the expression
@@ -64,14 +64,24 @@ func (e *ExpressionInterfaceImpl) AS(alias string) Projection {
 	return newAlias(e.Parent, alias)
 }
 
-// ASC expression will be used to sort query result in ascending order
+// ASC expression will be used to sort a query result in ascending order
 func (e *ExpressionInterfaceImpl) ASC() OrderByClause {
-	return newOrderByClause(e.Parent, true)
+	return newOrderByAscending(e.Parent, true)
 }
 
-// DESC expression will be used to sort query result in descending order
+// DESC expression will be used to sort a query result in descending order
 func (e *ExpressionInterfaceImpl) DESC() OrderByClause {
-	return newOrderByClause(e.Parent, false)
+	return newOrderByAscending(e.Parent, false)
+}
+
+// NULLS_FIRST specifies sort where null values appear before all non-null values
+func (e *ExpressionInterfaceImpl) NULLS_FIRST() OrderByClause {
+	return newOrderByNullsFirst(e.Parent, true)
+}
+
+// NULLS_LAST specifies sort where null values appear after all non-null values
+func (e *ExpressionInterfaceImpl) NULLS_LAST() OrderByClause {
+	return newOrderByNullsFirst(e.Parent, false)
 }
 
 func (e *ExpressionInterfaceImpl) serializeForGroupBy(statement StatementType, out *SQLBuilder) {
@@ -263,6 +273,25 @@ func (p *betweenOperatorExpression) serialize(statement StatementType, out *SQLB
 	p.max.serialize(statement, out, FallTrough(options)...)
 }
 
+type customExpression struct {
+	ExpressionInterfaceImpl
+	parts []Serializer
+}
+
+func CustomExpression(parts ...Serializer) Expression {
+	ret := customExpression{
+		parts: parts,
+	}
+	ret.ExpressionInterfaceImpl.Parent = &ret
+	return &ret
+}
+
+func (c *customExpression) serialize(statement StatementType, out *SQLBuilder, options ...SerializeOption) {
+	for _, expression := range c.parts {
+		expression.serialize(statement, out, options...)
+	}
+}
+
 type complexExpression struct {
 	ExpressionInterfaceImpl
 	expressions Expression
@@ -287,15 +316,6 @@ func (s *complexExpression) serialize(statement StatementType, out *SQLBuilder, 
 	}
 }
 
-type skipParenthesisWrap struct {
-	Expression
-}
-
-func skipWrap(expression Expression) Expression {
-	return &skipParenthesisWrap{expression}
-}
-
-// since the expression is a function parameter, there is no need to wrap it in parentheses
-func (s *skipParenthesisWrap) serialize(statement StatementType, out *SQLBuilder, options ...SerializeOption) {
-	s.Expression.serialize(statement, out, append(options, NoWrap)...)
+func wrap(expressions ...Expression) Expression {
+	return NewFunc("", expressions, nil)
 }

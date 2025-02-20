@@ -1,18 +1,22 @@
 package main
 
+//go:generate sh -c "printf 'package main\n\nconst version = \"'%s'\"\n' $(git describe --tags --abbrev=0) > version.go"
+
 import (
 	"flag"
 	"fmt"
+	"github.com/go-jet/jet/v2/internal/utils/errfmt"
+	"github.com/go-jet/jet/v2/internal/utils/strslice"
+	"os"
+	"strings"
+
 	"github.com/go-jet/jet/v2/generator/metadata"
 	sqlitegen "github.com/go-jet/jet/v2/generator/sqlite"
 	"github.com/go-jet/jet/v2/generator/template"
 	"github.com/go-jet/jet/v2/internal/jet"
-	"github.com/go-jet/jet/v2/internal/utils"
 	"github.com/go-jet/jet/v2/mysql"
 	postgres2 "github.com/go-jet/jet/v2/postgres"
 	"github.com/go-jet/jet/v2/sqlite"
-	"os"
-	"strings"
 
 	mysqlgen "github.com/go-jet/jet/v2/generator/mysql"
 	postgresgen "github.com/go-jet/jet/v2/generator/postgres"
@@ -38,11 +42,15 @@ var (
 	ignoreViews  string
 	ignoreEnums  string
 
-	destDir string
+	destDir  string
+	modelPkg string
+	tablePkg string
+	viewPkg  string
+	enumPkg  string
 )
 
 func init() {
-	flag.StringVar(&source, "source", "", "Database system name (postgres, mysql, mariadb or sqlite)")
+	flag.StringVar(&source, "source", "", "Database system name (postgres, mysql, cockroachdb, mariadb or sqlite)")
 
 	flag.StringVar(&dsn, "dsn", "", `Data source name. Unified format for connecting to database.
     	PostgreSQL: https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING
@@ -59,44 +67,22 @@ func init() {
 	flag.StringVar(&user, "user", "", "Database user. Used only if dsn is not set.")
 	flag.StringVar(&password, "password", "", "The user’s password. Used only if dsn is not set.")
 	flag.StringVar(&dbName, "dbname", "", "Database name. Used only if dsn is not set.")
-	flag.StringVar(&schemaName, "schema", "public", `Database schema name. Used only if dsn is not set. (default "public")(PostgreSQL only)`)
+	flag.StringVar(&schemaName, "schema", "public", `Database schema name. (default "public")(PostgreSQL only)`)
 	flag.StringVar(&params, "params", "", "Additional connection string parameters(optional). Used only if dsn is not set.")
 	flag.StringVar(&sslmode, "sslmode", "disable", `Whether or not to use SSL. Used only if dsn is not set. (optional)(default "disable")(PostgreSQL only)`)
-	flag.StringVar(&ignoreTables, "ignore-tables", "", `Comma-separated list of tables to ignore`)
-	flag.StringVar(&ignoreViews, "ignore-views", "", `Comma-separated list of views to ignore`)
-	flag.StringVar(&ignoreEnums, "ignore-enums", "", `Comma-separated list of enums to ignore`)
+	flag.StringVar(&ignoreTables, "ignore-tables", "", `Comma-separated list of tables to ignore.`)
+	flag.StringVar(&ignoreViews, "ignore-views", "", `Comma-separated list of views to ignore.`)
+	flag.StringVar(&ignoreEnums, "ignore-enums", "", `Comma-separated list of enums to ignore.`)
 
-	flag.StringVar(&destDir, "path", "", "Destination dir for files generated.")
+	flag.StringVar(&destDir, "path", "", "Destination directory for files generated.")
+	flag.StringVar(&modelPkg, "rel-model-path", "model", "Relative path for the Model files package from the destination directory.")
+	flag.StringVar(&tablePkg, "rel-table-path", "table", "Relative path for the Table files package from the destination directory.")
+	flag.StringVar(&viewPkg, "rel-view-path", "view", "Relative path for the View files package from the destination directory.")
+	flag.StringVar(&enumPkg, "rel-enum-path", "enum", "Relative path for the Enum files package from the destination directory.")
 }
 
 func main() {
-
-	flag.Usage = func() {
-		fmt.Println("Jet generator 2.7.0")
-		fmt.Println()
-		fmt.Println("Usage:")
-
-		order := []string{
-			"source", "dsn", "host", "port", "user", "password", "dbname", "schema", "params", "sslmode",
-			"path",
-			"ignore-tables", "ignore-views", "ignore-enums",
-		}
-		for _, name := range order {
-			flagEntry := flag.CommandLine.Lookup(name)
-			fmt.Printf("  -%s\n", flagEntry.Name)
-			fmt.Printf("\t%s\n", flagEntry.Usage)
-		}
-
-		fmt.Println()
-		fmt.Println(`Example command:
-
-	$ jet -dsn=postgresql://jet:jet@localhost:5432/jetdb -schema=dvds -path=./gen
-	$ jet -source=postgres -dsn="user=jet password=jet host=localhost port=5432 dbname=jetdb" -schema=dvds -path=./gen
-	$ jet -source=mysql -host=localhost -port=3306 -user=jet -password=jet -dbname=jetdb -path=./gen
-	$ jet -source=sqlite -dsn="file://path/to/sqlite/database/file" -path=./gen
-		`)
-	}
-
+	flag.Usage = usage
 	flag.Parse()
 
 	if dsn == "" && (source == "" || host == "" || port == 0 || user == "" || dbName == "") {
@@ -111,11 +97,14 @@ func main() {
 	var err error
 
 	switch source {
-	case "postgresql", "postgres":
+	case "postgresql", "postgres", "cockroachdb", "cockroach":
+		generatorTemplate := genTemplate(postgres2.Dialect, ignoreTablesList, ignoreViewsList, ignoreEnumsList)
+
 		if dsn != "" {
-			err = postgresgen.GenerateDSN(dsn, schemaName, destDir)
+			err = postgresgen.GenerateDSN(dsn, schemaName, destDir, generatorTemplate)
 			break
 		}
+
 		dbConn := postgresgen.DBConnection{
 			Host:     host,
 			Port:     port,
@@ -131,14 +120,17 @@ func main() {
 		err = postgresgen.Generate(
 			destDir,
 			dbConn,
-			genTemplate(postgres2.Dialect, ignoreTablesList, ignoreViewsList, ignoreEnumsList),
+			generatorTemplate,
 		)
 
 	case "mysql", "mysqlx", "mariadb":
+		generatorTemplate := genTemplate(mysql.Dialect, ignoreTablesList, ignoreViewsList, ignoreEnumsList)
+
 		if dsn != "" {
-			err = mysqlgen.GenerateDSN(dsn, destDir)
+			err = mysqlgen.GenerateDSN(dsn, destDir, generatorTemplate)
 			break
 		}
+
 		dbConn := mysqlgen.DBConnection{
 			Host:     host,
 			Port:     port,
@@ -151,12 +143,13 @@ func main() {
 		err = mysqlgen.Generate(
 			destDir,
 			dbConn,
-			genTemplate(mysql.Dialect, ignoreTablesList, ignoreViewsList, ignoreEnumsList),
+			generatorTemplate,
 		)
 	case "sqlite":
 		if dsn == "" {
 			printErrorAndExit("ERROR: required -dsn flag missing.")
 		}
+
 		err = sqlitegen.GenerateDSN(
 			dsn,
 			destDir,
@@ -164,23 +157,53 @@ func main() {
 		)
 
 	case "":
-		printErrorAndExit("ERROR: required -source or -dns flag missing.")
+		printErrorAndExit("ERROR: required -source or -dsn flag missing.")
 
 	default:
 		printErrorAndExit("ERROR: unknown data source " + source + ". Only postgres, mysql, mariadb and sqlite are supported.")
 	}
 
 	if err != nil {
-		fmt.Println(err.Error())
-		os.Exit(-5)
+		fmt.Println(errfmt.Trace(err))
+		os.Exit(2)
 	}
+}
+
+func usage() {
+	fmt.Println("Jet generator", version)
+	fmt.Println()
+	fmt.Println("Usage:")
+
+	order := []string{
+		"source", "dsn", "host", "port", "user", "password", "dbname", "schema", "params", "sslmode",
+		"path",
+		"ignore-tables", "ignore-views", "ignore-enums",
+		"rel-model-path", "rel-table-path", "rel-view-path", "rel-enum-path",
+	}
+
+	for _, name := range order {
+		flagEntry := flag.CommandLine.Lookup(name)
+		fmt.Printf("  -%s\n", flagEntry.Name)
+		fmt.Printf("\t%s\n", flagEntry.Usage)
+	}
+
+	fmt.Println()
+	fmt.Println(`Example commands:
+
+	$ jet -dsn=postgresql://jet:jet@localhost:5432/jetdb?sslmode=disable -schema=dvds -path=./gen
+	$ jet -dsn=postgres://jet:jet@localhost:26257/jetdb?sslmode=disable -schema=dvds -path=./gen   #cockroachdb
+	$ jet -source=postgres -dsn="user=jet password=jet host=localhost port=5432 dbname=jetdb" -schema=dvds -path=./gen
+	$ jet -source=mysql -host=localhost -port=3306 -user=jet -password=jet -dbname=jetdb -path=./gen
+	$ jet -source=sqlite -dsn="file://path/to/sqlite/database/file" -path=./gen
+	$ jet -source=sqlite -dsn="file://path/to/sqlite/database/file" -path=./gen -rel-model-path=./entity
+	`)
 }
 
 func printErrorAndExit(error string) {
 	fmt.Println("\n", error)
 	fmt.Println()
 	flag.Usage()
-	os.Exit(-2)
+	os.Exit(1)
 }
 
 func getSource() string {
@@ -219,21 +242,21 @@ func parseList(list string) []string {
 func genTemplate(dialect jet.Dialect, ignoreTables []string, ignoreViews []string, ignoreEnums []string) template.Template {
 
 	shouldSkipTable := func(table metadata.Table) bool {
-		return utils.StringSliceContains(ignoreTables, strings.ToLower(table.Name))
+		return strslice.Contains(ignoreTables, strings.ToLower(table.Name))
 	}
 
 	shouldSkipView := func(view metadata.Table) bool {
-		return utils.StringSliceContains(ignoreViews, strings.ToLower(view.Name))
+		return strslice.Contains(ignoreViews, strings.ToLower(view.Name))
 	}
 
 	shouldSkipEnum := func(enum metadata.Enum) bool {
-		return utils.StringSliceContains(ignoreEnums, strings.ToLower(enum.Name))
+		return strslice.Contains(ignoreEnums, strings.ToLower(enum.Name))
 	}
 
 	return template.Default(dialect).
 		UseSchema(func(schemaMetaData metadata.Schema) template.Schema {
 			return template.DefaultSchema(schemaMetaData).
-				UseModel(template.DefaultModel().
+				UseModel(template.DefaultModel().UsePath(modelPkg).
 					UseTable(func(table metadata.Table) template.TableModel {
 						if shouldSkipTable(table) {
 							return template.TableModel{Skip: true}
@@ -258,19 +281,22 @@ func genTemplate(dialect jet.Dialect, ignoreTables []string, ignoreViews []strin
 						if shouldSkipTable(table) {
 							return template.TableSQLBuilder{Skip: true}
 						}
-						return template.DefaultTableSQLBuilder(table)
+
+						return template.DefaultTableSQLBuilder(table).UsePath(tablePkg)
 					}).
 					UseView(func(table metadata.Table) template.ViewSQLBuilder {
 						if shouldSkipView(table) {
 							return template.ViewSQLBuilder{Skip: true}
 						}
-						return template.DefaultViewSQLBuilder(table)
+
+						return template.DefaultViewSQLBuilder(table).UsePath(viewPkg)
 					}).
 					UseEnum(func(enum metadata.Enum) template.EnumSQLBuilder {
 						if shouldSkipEnum(enum) {
 							return template.EnumSQLBuilder{Skip: true}
 						}
-						return template.DefaultEnumSQLBuilder(enum)
+
+						return template.DefaultEnumSQLBuilder(enum).UsePath(enumPkg)
 					}),
 				)
 		})

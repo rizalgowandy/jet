@@ -3,9 +3,10 @@ package template
 import (
 	"fmt"
 	"github.com/go-jet/jet/v2/generator/metadata"
-	"github.com/go-jet/jet/v2/internal/utils"
+	"github.com/go-jet/jet/v2/internal/utils/dbidentifier"
 	"github.com/google/uuid"
-	"path"
+	"github.com/jackc/pgtype"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
@@ -22,7 +23,7 @@ type Model struct {
 
 // PackageName returns package name of model types
 func (m Model) PackageName() string {
-	return path.Base(m.Path)
+	return filepath.Base(m.Path)
 }
 
 // UsePath returns new Model template with replaced file path
@@ -77,8 +78,8 @@ var DefaultViewModel = DefaultTableModel
 // DefaultTableModel is default table template implementation
 func DefaultTableModel(tableMetaData metadata.Table) TableModel {
 	return TableModel{
-		FileName: utils.ToGoFileName(tableMetaData.Name),
-		TypeName: utils.ToGoIdentifier(tableMetaData.Name),
+		FileName: dbidentifier.ToGoFileName(tableMetaData.Name),
+		TypeName: dbidentifier.ToGoIdentifier(tableMetaData.Name),
 		Field:    DefaultTableModelField,
 	}
 }
@@ -142,13 +143,13 @@ func (em EnumModel) UseTypeName(typeName string) EnumModel {
 
 // DefaultEnumModel returns default implementation for EnumModel
 func DefaultEnumModel(enumMetaData metadata.Enum) EnumModel {
-	typeName := utils.ToGoIdentifier(enumMetaData.Name)
+	typeName := dbidentifier.ToGoIdentifier(enumMetaData.Name)
 
 	return EnumModel{
-		FileName: utils.ToGoFileName(enumMetaData.Name),
+		FileName: dbidentifier.ToGoFileName(enumMetaData.Name),
 		TypeName: typeName,
 		ValueName: func(value string) string {
-			return typeName + "_" + utils.ToGoIdentifier(value)
+			return typeName + "_" + dbidentifier.ToGoIdentifier(value)
 		},
 	}
 }
@@ -158,6 +159,7 @@ type TableModelField struct {
 	Name string
 	Type Type
 	Tags []string
+	Skip bool
 }
 
 // DefaultTableModelField returns default TableModelField implementation
@@ -169,9 +171,10 @@ func DefaultTableModelField(columnMetaData metadata.Column) TableModelField {
 	}
 
 	return TableModelField{
-		Name: utils.ToGoIdentifier(columnMetaData.Name),
+		Name: dbidentifier.ToGoIdentifier(columnMetaData.Name),
 		Type: getType(columnMetaData),
 		Tags: tags,
+		Skip: false,
 	}
 }
 
@@ -247,7 +250,7 @@ func getType(columnMetadata metadata.Column) Type {
 func getUserDefinedType(column metadata.Column) string {
 	switch column.DataType.Kind {
 	case metadata.EnumType:
-		return utils.ToGoIdentifier(column.DataType.Name)
+		return dbidentifier.ToGoIdentifier(column.DataType.Name)
 	case metadata.UserDefinedType, metadata.ArrayType:
 		return "string"
 	}
@@ -320,6 +323,18 @@ func toGoType(column metadata.Column) interface{} {
 		return float64(0.0)
 	case "uuid":
 		return uuid.UUID{}
+	case "daterange":
+		return pgtype.Daterange{}
+	case "tsrange":
+		return pgtype.Tsrange{}
+	case "tstzrange":
+		return pgtype.Tstzrange{}
+	case "int4range":
+		return pgtype.Int4range{}
+	case "int8range":
+		return pgtype.Int8range{}
+	case "numrange":
+		return pgtype.Numrange{}
 	default:
 		fmt.Println("- [Model      ] Unsupported sql column '" + column.Name + " " + column.DataType.Name + "', using string instead.")
 		return ""

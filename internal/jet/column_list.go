@@ -4,6 +4,10 @@ package jet
 type ColumnList []ColumnExpression
 
 // SET creates column assigment for each column in column list. expression should be created by ROW function
+//
+//	Link.UPDATE().
+//		SET(Link.MutableColumns.SET(ROW(String("github.com"), Bool(false))).
+//		WHERE(Link.ID.EQ(Int(0)))
 func (cl ColumnList) SET(expression Expression) ColumnAssigment {
 	return columnAssigmentImpl{
 		column:     cl,
@@ -11,7 +15,9 @@ func (cl ColumnList) SET(expression Expression) ColumnAssigment {
 	}
 }
 
-// Except will create new column list in which columns contained in excluded column names are removed
+// Except will create new column list in which columns contained in list of excluded column names are removed
+//
+//	Address.AllColumns.Except(Address.PostalCode, Address.Phone)
 func (cl ColumnList) Except(excludedColumns ...Column) ColumnList {
 	excludedColumnList := UnwidColumnList(excludedColumns)
 	excludedColumnNames := map[string]bool{}
@@ -30,6 +36,18 @@ func (cl ColumnList) Except(excludedColumns ...Column) ColumnList {
 		ret = append(ret, column)
 	}
 
+	return ret
+}
+
+// As will create new projection list where each column is wrapped with a new table alias.
+// tableAlias should be in the form 'name' or 'name.*', or it can also be an empty string.
+// For instance: If projection list has a column 'Artist.Name', and tableAlias is 'Musician.*', returned projection list will
+// have a column wrapped in alias 'Musician.Name'. If tableAlias is empty string, it removes existing table alias ('Artist.Name' becomes 'Name').
+func (cl ColumnList) As(tableAlias string) ProjectionList {
+	ret := make(ProjectionList, 0, len(cl))
+	for _, c := range cl {
+		ret = append(ret, c.AS(joinAlias(tableAlias, c.Name())))
+	}
 	return ret
 }
 

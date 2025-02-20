@@ -11,102 +11,35 @@ var autoGenWarningTemplate = `
 `
 
 var tableSQLBuilderTemplate = ` 
-{{define "column-list" -}}
-	{{- range $i, $c := . }}
-{{- $field := columnField $c}}
-		{{- if gt $i 0 }}, {{end}}{{$field.Name}}Column
-	{{- end}}
-{{- end}}
-
 package {{package}}
 
 import (
 	"github.com/go-jet/jet/v2/{{dialect.PackageName}}"
 )
 
-var {{tableTemplate.InstanceName}} = new{{tableTemplate.TypeName}}("{{schemaName}}", "{{.Name}}", "")
+var {{tableTemplate.InstanceName}} = new{{tableTemplate.TypeName}}("{{schemaName}}", "{{.Name}}", "{{tableTemplate.DefaultAlias}}")
 
-type {{tableTemplate.TypeName}} struct {
-	{{dialect.PackageName}}.Table
-	
-	//Columns
-{{- range $i, $c := .Columns}}
-{{- $field := columnField $c}}
-	{{$field.Name}} {{dialect.PackageName}}.Column{{$field.Type}}
-{{- end}}
-
-	AllColumns     {{dialect.PackageName}}.ColumnList
-	MutableColumns {{dialect.PackageName}}.ColumnList
-}
-
-// AS creates new {{tableTemplate.TypeName}} with assigned alias
-func (a {{tableTemplate.TypeName}}) AS(alias string) {{tableTemplate.TypeName}} {
-	return new{{tableTemplate.TypeName}}(a.SchemaName(), a.TableName(), alias)
-}
-
-// Schema creates new {{tableTemplate.TypeName}} with assigned schema name
-func (a {{tableTemplate.TypeName}}) FromSchema(schemaName string) {{tableTemplate.TypeName}} {
-	return new{{tableTemplate.TypeName}}(schemaName, a.TableName(), a.Alias())
-}
-
-func new{{tableTemplate.TypeName}}(schemaName, tableName, alias string) {{tableTemplate.TypeName}} {
-	var (
-{{- range $i, $c := .Columns}}
-{{- $field := columnField $c}}
-		{{$field.Name}}Column = {{dialect.PackageName}}.{{$field.Type}}Column("{{$c.Name}}")
-{{- end}}
-		allColumns     = {{dialect.PackageName}}.ColumnList{ {{template "column-list" .Columns}} }
-		mutableColumns = {{dialect.PackageName}}.ColumnList{ {{template "column-list" .MutableColumns}} }
-	)
-
-	return {{tableTemplate.TypeName}}{
-		Table: {{dialect.PackageName}}.NewTable(schemaName, tableName, alias, allColumns...),
-
-		//Columns
-{{- range $i, $c := .Columns}}
-{{- $field := columnField $c}}
-		{{$field.Name}}: {{$field.Name}}Column,
-{{- end}}
-
-		AllColumns:     allColumns,
-		MutableColumns: mutableColumns,
-	}
-}
-`
-
-var tableSQLBuilderTemplateWithEXCLUDED = ` 
-{{define "column-list" -}}
-	{{- range $i, $c := . }}
-{{- $field := columnField $c}}
-		{{- if gt $i 0 }}, {{end}}{{$field.Name}}Column
-	{{- end}}
-{{- end}}
-
-package {{package}}
-
-import (
-	"github.com/go-jet/jet/v2/{{dialect.PackageName}}"
-)
-
-var {{tableTemplate.InstanceName}} = new{{tableTemplate.TypeName}}("{{schemaName}}", "{{.Name}}", "")
-
+{{golangComment .Comment}}
 type {{structImplName}} struct {
 	{{dialect.PackageName}}.Table
 	
-	//Columns
+	// Columns
 {{- range $i, $c := .Columns}}
 {{- $field := columnField $c}}
-	{{$field.Name}} {{dialect.PackageName}}.Column{{$field.Type}}
+{{- if not $field.Skip}}
+	{{$field.Name}} {{dialect.PackageName}}.Column{{$field.Type}} {{golangComment .Comment}}
+{{- end}}
 {{- end}}
 
 	AllColumns     {{dialect.PackageName}}.ColumnList
 	MutableColumns {{dialect.PackageName}}.ColumnList
+	DefaultColumns {{dialect.PackageName}}.ColumnList
 }
 
 type {{tableTemplate.TypeName}} struct {
 	{{structImplName}}
 
-	EXCLUDED {{structImplName}}
+	{{toUpper insertedRowAlias}} {{structImplName}}
 }
 
 // AS creates new {{tableTemplate.TypeName}} with assigned alias
@@ -119,10 +52,20 @@ func (a {{tableTemplate.TypeName}}) FromSchema(schemaName string) *{{tableTempla
 	return new{{tableTemplate.TypeName}}(schemaName, a.TableName(), a.Alias())
 }
 
+// WithPrefix creates new {{tableTemplate.TypeName}} with assigned table prefix
+func (a {{tableTemplate.TypeName}}) WithPrefix(prefix string) *{{tableTemplate.TypeName}} {
+	return new{{tableTemplate.TypeName}}(a.SchemaName(), prefix+a.TableName(), a.TableName())
+}
+
+// WithSuffix creates new {{tableTemplate.TypeName}} with assigned table suffix
+func (a {{tableTemplate.TypeName}}) WithSuffix(suffix string) *{{tableTemplate.TypeName}} {
+	return new{{tableTemplate.TypeName}}(a.SchemaName(), a.TableName()+suffix, a.TableName())
+}
+
 func new{{tableTemplate.TypeName}}(schemaName, tableName, alias string) *{{tableTemplate.TypeName}} {
 	return &{{tableTemplate.TypeName}}{
 		{{structImplName}}: new{{tableTemplate.TypeName}}Impl(schemaName, tableName, alias),
-		EXCLUDED:  new{{tableTemplate.TypeName}}Impl("", "excluded", ""),
+		{{toUpper insertedRowAlias}}:  new{{tableTemplate.TypeName}}Impl("", "{{insertedRowAlias}}", ""),
 	}
 }
 
@@ -130,10 +73,13 @@ func new{{tableTemplate.TypeName}}Impl(schemaName, tableName, alias string) {{st
 	var (
 {{- range $i, $c := .Columns}}
 {{- $field := columnField $c}}
+{{- if not $field.Skip }}
 		{{$field.Name}}Column = {{dialect.PackageName}}.{{$field.Type}}Column("{{$c.Name}}")
 {{- end}}
-		allColumns     = {{dialect.PackageName}}.ColumnList{ {{template "column-list" .Columns}} }
-		mutableColumns = {{dialect.PackageName}}.ColumnList{ {{template "column-list" .MutableColumns}} }
+{{- end}}
+		allColumns     = {{dialect.PackageName}}.ColumnList{ {{columnList .Columns}} }
+		mutableColumns = {{dialect.PackageName}}.ColumnList{ {{columnList .MutableColumns}} }
+		defaultColumns = {{dialect.PackageName}}.ColumnList{ {{columnList .DefaultColumns}} }
 	)
 
 	return {{structImplName}}{
@@ -142,12 +88,26 @@ func new{{tableTemplate.TypeName}}Impl(schemaName, tableName, alias string) {{st
 		//Columns
 {{- range $i, $c := .Columns}}
 {{- $field := columnField $c}}
+{{- if not $field.Skip }}
 		{{$field.Name}}: {{$field.Name}}Column,
+{{- end}}
 {{- end}}
 
 		AllColumns:     allColumns,
 		MutableColumns: mutableColumns,
+		DefaultColumns: defaultColumns,
 	}
+}
+`
+
+var tableSqlBuilderSetSchemaTemplate = `package {{package}}
+
+// UseSchema sets a new schema name for all generated {{type}} SQL builder types. It is recommended to invoke 
+// this method only once at the beginning of the program.
+func UseSchema(schema string) {
+{{- range .}}
+	{{ .InstanceName }} = {{ .InstanceName }}.FromSchema(schema)
+{{- end}}
 }
 `
 
@@ -162,10 +122,13 @@ import (
 {{end}}
 
 {{$modelTableTemplate := tableTemplate}}
+{{golangComment .Comment}}
 type {{$modelTableTemplate.TypeName}} struct {
 {{- range .Columns}}
 {{- $field := structField .}}
-	{{$field.Name}} {{$field.Type.Name}} ` + "{{$field.TagsString}}" + `
+{{- if not $field.Skip}}
+	{{$field.Name}} {{$field.Type.Name}} ` + "{{$field.TagsString}}" + ` {{golangComment .Comment}}
+{{- end }}
 {{- end}}
 }
 
@@ -175,6 +138,7 @@ var enumSQLBuilderTemplate = `package {{package}}
 
 import "github.com/go-jet/jet/v2/{{dialect.PackageName}}"
 
+{{golangComment .Comment}}
 var {{enumTemplate.InstanceName}} = &struct {
 {{- range $index, $value := .Values}}
 	{{enumValueName $value}} {{dialect.PackageName}}.StringExpression
@@ -191,6 +155,7 @@ var enumModelTemplate = `package {{package}}
 
 import "errors"
 
+{{golangComment .Comment}}
 type {{$enumTemplate.TypeName}} string
 
 const (
@@ -198,6 +163,12 @@ const (
 	{{valueName $value}} {{$enumTemplate.TypeName}} = "{{$value}}"
 {{- end}}
 )
+
+var {{$enumTemplate.TypeName}}AllValues = []{{$enumTemplate.TypeName}} {
+{{- range $_, $value := .Values}}
+	{{valueName $value}},
+{{- end}}
+}
 
 func (e *{{$enumTemplate.TypeName}}) Scan(value interface{}) error {
 	var enumValue string

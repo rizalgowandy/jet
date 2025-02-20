@@ -2,11 +2,11 @@ package mysql
 
 import (
 	"fmt"
+	"github.com/go-jet/jet/v2/internal/utils/datetime"
 	"regexp"
 	"time"
 
 	"github.com/go-jet/jet/v2/internal/jet"
-	"github.com/go-jet/jet/v2/internal/utils"
 )
 
 type unitType string
@@ -14,35 +14,37 @@ type unitType string
 // List of interval unit types for MySQL
 const (
 	MICROSECOND        unitType = "MICROSECOND"
-	SECOND                      = "SECOND"
-	MINUTE                      = "MINUTE"
-	HOUR                        = "HOUR"
-	DAY                         = "DAY"
-	WEEK                        = "WEEK"
-	MONTH                       = "MONTH"
-	QUARTER                     = "QUARTER"
-	YEAR                        = "YEAR"
-	SECOND_MICROSECOND          = "SECOND_MICROSECOND"
-	MINUTE_MICROSECOND          = "MINUTE_MICROSECOND"
-	MINUTE_SECOND               = "MINUTE_SECOND"
-	HOUR_MICROSECOND            = "HOUR_MICROSECOND"
-	HOUR_SECOND                 = "HOUR_SECOND"
-	HOUR_MINUTE                 = "HOUR_MINUTE"
-	DAY_MICROSECOND             = "DAY_MICROSECOND"
-	DAY_SECOND                  = "DAY_SECOND"
-	DAY_MINUTE                  = "DAY_MINUTE"
-	DAY_HOUR                    = "DAY_HOUR"
-	YEAR_MONTH                  = "YEAR_MONTH"
+	SECOND             unitType = "SECOND"
+	MINUTE             unitType = "MINUTE"
+	HOUR               unitType = "HOUR"
+	DAY                unitType = "DAY"
+	WEEK               unitType = "WEEK"
+	MONTH              unitType = "MONTH"
+	QUARTER            unitType = "QUARTER"
+	YEAR               unitType = "YEAR"
+	SECOND_MICROSECOND unitType = "SECOND_MICROSECOND"
+	MINUTE_MICROSECOND unitType = "MINUTE_MICROSECOND"
+	MINUTE_SECOND      unitType = "MINUTE_SECOND"
+	HOUR_MICROSECOND   unitType = "HOUR_MICROSECOND"
+	HOUR_SECOND        unitType = "HOUR_SECOND"
+	HOUR_MINUTE        unitType = "HOUR_MINUTE"
+	DAY_MICROSECOND    unitType = "DAY_MICROSECOND"
+	DAY_SECOND         unitType = "DAY_SECOND"
+	DAY_MINUTE         unitType = "DAY_MINUTE"
+	DAY_HOUR           unitType = "DAY_HOUR"
+	YEAR_MONTH         unitType = "YEAR_MONTH"
 )
 
 // Interval is representation of MySQL interval
 type Interval = jet.Interval
 
 // INTERVAL creates new temporal interval.
-// In a case of MICROSECOND, SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, QUARTER, YEAR unit type
-// value parameter should be number. For example: INTERVAL(1, DAY)
-// In a case of other unit types, value should be string with appropriate format.
-// For example: INTERVAL("10:08:50", HOUR_SECOND)
+//
+//	In a case of MICROSECOND, SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, QUARTER, YEAR unit type
+//	value parameter has to be a number.
+//			INTERVAL(1, DAY)
+//	In a case of other unit types, value should be string with appropriate format.
+//			INTERVAL("10:08:50", HOUR_SECOND)
 func INTERVAL(value interface{}, unitType unitType) Interval {
 	switch unitType {
 	case MICROSECOND, SECOND, MINUTE, HOUR, DAY, WEEK, MONTH, QUARTER, YEAR:
@@ -110,7 +112,7 @@ func INTERVALd(duration time.Duration) Interval {
 		duration = -duration
 	}
 
-	days, hours, minutes, sec, microsec := utils.ExtractDateTimeComponents(duration)
+	days, hours, minutes, sec, microsec := datetime.ExtractTimeComponents(duration)
 
 	if days != 0 {
 		switch {

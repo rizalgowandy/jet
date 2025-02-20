@@ -31,6 +31,12 @@ type IntegerExpression interface {
 	BIT_SHIFT_RIGHT(shift IntegerExpression) IntegerExpression
 }
 
+// additional integer expression subtypes, used in range expressions.
+type (
+	Int4Expression IntegerExpression
+	Int8Expression IntegerExpression
+)
+
 type integerInterfaceImpl struct {
 	numericExpressionImpl
 	parent IntegerExpression
@@ -120,17 +126,14 @@ func (i *integerInterfaceImpl) BIT_SHIFT_RIGHT(intExpression IntegerExpression) 
 	return newBinaryIntegerOperatorExpression(i.parent, intExpression, ">>")
 }
 
-//---------------------------------------------------//
 func newBinaryIntegerOperatorExpression(lhs, rhs IntegerExpression, operator string) IntegerExpression {
 	return IntExp(NewBinaryOperatorExpression(lhs, rhs, operator))
 }
 
-//---------------------------------------------------//
 func newPrefixIntegerOperatorExpression(expression IntegerExpression, operator string) IntegerExpression {
 	return IntExp(newPrefixOperatorExpression(expression, operator))
 }
 
-//---------------------------------------------------//
 type integerExpressionWrapper struct {
 	integerInterfaceImpl
 

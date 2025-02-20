@@ -2,28 +2,40 @@ package testutils
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/go-jet/jet/v2/internal/jet"
 	"github.com/go-jet/jet/v2/internal/utils/throw"
 	"github.com/go-jet/jet/v2/qrm"
+	"github.com/go-jet/jet/v2/stmtcache"
+	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
-
-	"github.com/google/go-cmp/cmp"
 )
 
 // UnixTimeComparer will compare time equality while ignoring time zone
 var UnixTimeComparer = cmp.Comparer(func(t1, t2 time.Time) bool {
 	return t1.Unix() == t2.Unix()
 })
+
+// AssertExecAndRollback will execute and rollback statement in sql transaction
+func AssertExecAndRollback(t *testing.T, stmt jet.Statement, db *stmtcache.DB, rowsAffected ...int64) {
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	defer func() {
+		err := tx.Rollback()
+		require.NoError(t, err)
+	}()
+
+	AssertExec(t, stmt, tx, rowsAffected...)
+}
 
 // AssertExec assert statement execution for successful execution and number of rows affected
 func AssertExec(t *testing.T, stmt jet.Statement, db qrm.DB, rowsAffected ...int64) {
@@ -38,9 +50,41 @@ func AssertExec(t *testing.T, stmt jet.Statement, db qrm.DB, rowsAffected ...int
 	}
 }
 
+// AssertExecContext assert statement execution for successful execution and number of rows affected
+func AssertExecContext(t *testing.T, stmt jet.Statement, ctx context.Context, db qrm.DB, rowsAffected ...int64) {
+	res, err := stmt.ExecContext(ctx, db)
+
+	require.NoError(t, err)
+	rows, err := res.RowsAffected()
+	require.NoError(t, err)
+
+	if len(rowsAffected) > 0 {
+		require.Equal(t, rowsAffected[0], rows)
+	}
+}
+
+// ExecuteInTxAndRollback will execute function in sql transaction and then rollback transaction
+func ExecuteInTxAndRollback(t *testing.T, db *stmtcache.DB, f func(tx qrm.DB)) {
+	tx, err := db.Begin()
+	require.NoError(t, err)
+	defer func() {
+		err := tx.Rollback()
+		require.NoError(t, err)
+	}()
+
+	f(tx)
+}
+
 // AssertExecErr assert statement execution for failed execution with error string errorStr
 func AssertExecErr(t *testing.T, stmt jet.Statement, db qrm.DB, errorStr string) {
 	_, err := stmt.Exec(db)
+
+	require.Error(t, err, errorStr)
+}
+
+// AssertExecContextErr assert statement execution for failed execution with error string errorStr
+func AssertExecContextErr(ctx context.Context, t *testing.T, stmt jet.Statement, db qrm.DB, errorStr string) {
+	_, err := stmt.ExecContext(ctx, db)
 
 	require.Error(t, err, errorStr)
 }
@@ -72,11 +116,12 @@ func AssertJSON(t *testing.T, data interface{}, expectedJSON string) {
 }
 
 // SaveJSONFile saves v as json at testRelativePath
+// nolint:unused
 func SaveJSONFile(v interface{}, testRelativePath string) {
 	jsonText, _ := json.MarshalIndent(v, "", "\t")
 
 	filePath := getFullPath(testRelativePath)
-	err := ioutil.WriteFile(filePath, jsonText, 0644)
+	err := os.WriteFile(filePath, jsonText, 0600)
 
 	throw.OnError(err)
 }
@@ -85,7 +130,7 @@ func SaveJSONFile(v interface{}, testRelativePath string) {
 func AssertJSONFile(t *testing.T, data interface{}, testRelativePath string) {
 
 	filePath := getFullPath(testRelativePath)
-	fileJSONData, err := ioutil.ReadFile(filePath)
+	fileJSONData, err := os.ReadFile(filePath) // #nosec G304
 	require.NoError(t, err)
 
 	if runtime.GOOS == "windows" {
@@ -100,7 +145,7 @@ func AssertJSONFile(t *testing.T, data interface{}, testRelativePath string) {
 }
 
 // AssertStatementSql check if statement Sql() is the same as expectedQuery and expectedArgs
-func AssertStatementSql(t *testing.T, query jet.Statement, expectedQuery string, expectedArgs ...interface{}) {
+func AssertStatementSql(t *testing.T, query jet.PrintableStatement, expectedQuery string, expectedArgs ...interface{}) {
 	queryStr, args := query.Sql()
 	assertQueryString(t, queryStr, expectedQuery)
 
@@ -121,7 +166,7 @@ func AssertStatementSqlErr(t *testing.T, stmt jet.Statement, errorStr string) {
 }
 
 // AssertDebugStatementSql check if statement Sql() is the same as expectedQuery
-func AssertDebugStatementSql(t *testing.T, query jet.Statement, expectedQuery string, expectedArgs ...interface{}) {
+func AssertDebugStatementSql(t *testing.T, query jet.PrintableStatement, expectedQuery string, expectedArgs ...interface{}) {
 	_, args := query.Sql()
 
 	if len(expectedArgs) > 0 {
@@ -212,7 +257,7 @@ func AssertQueryPanicErr(t *testing.T, stmt jet.Statement, db qrm.DB, dest inter
 
 // AssertFileContent check if file content at filePath contains expectedContent text.
 func AssertFileContent(t *testing.T, filePath string, expectedContent string) {
-	enumFileData, err := ioutil.ReadFile(filePath)
+	enumFileData, err := os.ReadFile(filePath) // #nosec G304
 
 	require.NoError(t, err)
 
@@ -220,12 +265,15 @@ func AssertFileContent(t *testing.T, filePath string, expectedContent string) {
 }
 
 // AssertFileNamesEqual check if all filesInfos are contained in fileNames
-func AssertFileNamesEqual(t *testing.T, fileInfos []os.FileInfo, fileNames ...string) {
-	require.Equal(t, len(fileInfos), len(fileNames))
+func AssertFileNamesEqual(t *testing.T, dirPath string, fileNames ...string) {
+	files, err := os.ReadDir(dirPath)
+	require.NoError(t, err)
+
+	require.Equal(t, len(files), len(fileNames))
 
 	fileNamesMap := map[string]bool{}
 
-	for _, fileInfo := range fileInfos {
+	for _, fileInfo := range files {
 		fileNamesMap[fileInfo.Name()] = true
 	}
 
@@ -255,76 +303,6 @@ func printDiff(actual, expected interface{}, options ...cmp.Option) {
 	fmt.Println(actual)
 	fmt.Println("Expected: ")
 	fmt.Println(expected)
-}
-
-// BoolPtr returns address of bool parameter
-func BoolPtr(b bool) *bool {
-	return &b
-}
-
-// Int8Ptr returns address of int8 parameter
-func Int8Ptr(i int8) *int8 {
-	return &i
-}
-
-// UInt8Ptr returns address of uint8 parameter
-func UInt8Ptr(i uint8) *uint8 {
-	return &i
-}
-
-// Int16Ptr returns address of int16 parameter
-func Int16Ptr(i int16) *int16 {
-	return &i
-}
-
-// UInt16Ptr returns address of uint16 parameter
-func UInt16Ptr(i uint16) *uint16 {
-	return &i
-}
-
-// Int32Ptr returns address of int32 parameter
-func Int32Ptr(i int32) *int32 {
-	return &i
-}
-
-// UInt32Ptr returns address of uint32 parameter
-func UInt32Ptr(i uint32) *uint32 {
-	return &i
-}
-
-// Int64Ptr returns address of int64 parameter
-func Int64Ptr(i int64) *int64 {
-	return &i
-}
-
-// UInt64Ptr returns address of uint64 parameter
-func UInt64Ptr(i uint64) *uint64 {
-	return &i
-}
-
-// StringPtr returns address of string parameter
-func StringPtr(s string) *string {
-	return &s
-}
-
-// TimePtr returns address of time.Time parameter
-func TimePtr(t time.Time) *time.Time {
-	return &t
-}
-
-// ByteArrayPtr returns address of []byte parameter
-func ByteArrayPtr(arr []byte) *[]byte {
-	return &arr
-}
-
-// Float32Ptr returns address of float32 parameter
-func Float32Ptr(f float32) *float32 {
-	return &f
-}
-
-// Float64Ptr returns address of float64 parameter
-func Float64Ptr(f float64) *float64 {
-	return &f
 }
 
 // UUIDPtr returns address of uuid.UUID

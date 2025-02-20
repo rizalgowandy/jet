@@ -1,6 +1,8 @@
 package postgres
 
-import "github.com/go-jet/jet/v2/internal/jet"
+import (
+	"github.com/go-jet/jet/v2/internal/jet"
+)
 
 // This functions can be used, instead of its method counterparts, to have a better indentation of a complex condition
 // in the Go code and in the generated SQL.
@@ -11,8 +13,10 @@ var (
 	OR = jet.OR
 )
 
-// ROW is construct one table row from list of expressions.
-var ROW = jet.ROW
+// ROW function is used to create a tuple value that consists of a set of expressions or column values.
+func ROW(expressions ...Expression) RowExpression {
+	return jet.ROW(Dialect, expressions...)
+}
 
 // ------------------ Mathematical functions ---------------//
 
@@ -265,6 +269,18 @@ var TO_HEX = jet.TO_HEX
 
 //----------Data Type Formatting Functions ----------------------//
 
+// LOWER_BOUND returns range expressions lower bound
+func LOWER_BOUND[T Expression](expression jet.Range[T]) T {
+	return jet.LOWER_BOUND[T](expression)
+}
+
+// UPPER_BOUND returns range expressions upper bound
+func UPPER_BOUND[T Expression](expression jet.Range[T]) T {
+	return jet.UPPER_BOUND[T](expression)
+}
+
+//----------Data Type Formatting Functions ----------------------//
+
 // TO_CHAR converts expression to string with format
 var TO_CHAR = jet.TO_CHAR
 
@@ -278,6 +294,27 @@ var TO_NUMBER = jet.TO_NUMBER
 var TO_TIMESTAMP = jet.TO_TIMESTAMP
 
 //----------------- Date/Time Functions and Operators ------------//
+
+// Additional time unit types for EXTRACT function
+const (
+	DOW unit = MILLENNIUM + 1 + iota
+	DOY
+	EPOCH
+	ISODOW
+	ISOYEAR
+	JULIAN
+	QUARTER
+	TIMEZONE
+	TIMEZONE_HOUR
+	TIMEZONE_MINUTE
+)
+
+// EXTRACT function retrieves subfields such as year or hour from date/time values
+//
+//	EXTRACT(DAY, User.CreatedAt)
+func EXTRACT(field unit, from Expression) FloatExpression {
+	return FloatExp(jet.EXTRACT(unitToString(field), from))
+}
 
 // CURRENT_DATE returns current date
 var CURRENT_DATE = jet.CURRENT_DATE
@@ -296,6 +333,25 @@ var LOCALTIMESTAMP = jet.LOCALTIMESTAMP
 
 // NOW returns current date and time
 var NOW = jet.NOW
+
+// DATE_TRUNC returns the truncated date and time using optional time zone.
+// Use TimestampzExp if you need timestamp with time zone and IntervalExp if you need interval.
+func DATE_TRUNC(field unit, source Expression, timezone ...string) TimestampExpression {
+	if len(timezone) > 0 {
+		return jet.NewTimestampFunc("DATE_TRUNC", jet.FixedLiteral(unitToString(field)), source, jet.FixedLiteral(timezone[0]))
+	}
+
+	return jet.NewTimestampFunc("DATE_TRUNC", jet.FixedLiteral(unitToString(field)), source)
+}
+
+// GENERATE_SERIES generates a series of values from start to stop, with a step size of step.
+func GENERATE_SERIES(start Expression, stop Expression, step ...Expression) Expression {
+	if len(step) > 0 {
+		return jet.NewFunc("GENERATE_SERIES", []Expression{start, stop, step[0]}, nil)
+	}
+
+	return jet.NewFunc("GENERATE_SERIES", []Expression{start, stop}, nil)
+}
 
 // --------------- Conditional Expressions Functions -------------//
 
@@ -367,3 +423,52 @@ func castFloatLiteral(fraction FloatExpression) FloatExpression {
 	}
 	return fraction
 }
+
+// ----------------- Group By operators --------------------------//
+
+// GROUPING_SETS operator allows grouping of the rows in a table by multiple sets of columns(or expressions) in a single query.
+// This can be useful when we want to analyze data by different combinations of columns, without having to write separate
+// queries for each combination. GROUPING_SETS sets of columns are constructed with WRAP method.
+//
+//	GROUPING_SETS(
+//		WRAP(Inventory.FilmID, Inventory.StoreID),
+//		WRAP(),
+//	),
+var GROUPING_SETS = jet.GROUPING_SETS
+
+// WRAP surrounds a list of expressions or columns with parentheses, producing new row: (expression1, expression2, ...)
+// The construct (a, b) is normally recognized in expressions as a row constructor. WRAP and ROW methods behave exactly the same,
+// except when used in GROUPING_SETS and VALUES. In these contexts, WRAP must be used instead of ROW.
+func WRAP(expressions ...Expression) RowExpression {
+	return jet.WRAP(Dialect, expressions...)
+}
+
+// ROLLUP operator is used with the GROUP BY clause to generate all prefixes of a group of columns including the empty list.
+// It creates extra rows in the result set that represent the subtotal values for each combination of columns.
+var ROLLUP = jet.ROLLUP
+
+// CUBE operator is used with the GROUP BY clause to generate subtotals for all possible combinations of a group of columns.
+// It creates extra rows in the result set that represent the subtotal values for each combination of columns.
+var CUBE = jet.CUBE
+
+// GROUPING function is used to identify which columns are included in a grouping set or a subtotal row. It takes as input
+// the name of a column and returns 1 if the column is not included in the current grouping set, and 0 otherwise.
+// It can be also used with multiple parameters to check if a set of columns is included in the current grouping set. The result
+// of the GROUPING function would then be an integer bit mask having 1’s for the arguments which have GROUPING(argument) as 1.
+var GROUPING = jet.GROUPING
+
+// range constructor functions
+var (
+	// DATE_RANGE constructor function to create a date range
+	DATE_RANGE = jet.DateRange
+	// NUM_RANGE constructor function to create a numeric range
+	NUM_RANGE = jet.NumRange
+	// TS_RANGE constructor function to create a timestamp range
+	TS_RANGE = jet.TsRange
+	// TSTZ_RANGE constructor function to create a timestampz range
+	TSTZ_RANGE = jet.TstzRange
+	// INT4_RANGE constructor function to create a int4 range
+	INT4_RANGE = jet.Int4Range
+	// INT8_RANGE constructor function to create a int8 range
+	INT8_RANGE = jet.Int8Range
+)

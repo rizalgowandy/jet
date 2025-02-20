@@ -58,7 +58,7 @@ type SelectStatement interface {
 	AsTable(alias string) SelectTable
 }
 
-//SELECT creates new SelectStatement with list of projections
+// SELECT creates new SelectStatement with list of projections
 func SELECT(projection Projection, projections ...Projection) SelectStatement {
 	return newSelectStatement(nil, append([]Projection{projection}, projections...))
 }
@@ -74,7 +74,6 @@ func newSelectStatement(table ReadableTable, projections []Projection) SelectSta
 		newSelect.From.Tables = []jet.Serializer{table}
 	}
 	newSelect.Limit.Count = -1
-	newSelect.Offset.Count = -1
 	newSelect.ShareLock.Name = "LOCK IN SHARE MODE"
 	newSelect.ShareLock.InNewLine = true
 
@@ -141,7 +140,7 @@ func (s *selectStatementImpl) LIMIT(limit int64) SelectStatement {
 }
 
 func (s *selectStatementImpl) OFFSET(offset int64) SelectStatement {
-	s.Offset.Count = offset
+	s.Offset.Count = Int(offset)
 	return s
 }
 
@@ -156,7 +155,7 @@ func (s *selectStatementImpl) LOCK_IN_SHARE_MODE() SelectStatement {
 }
 
 func (s *selectStatementImpl) AsTable(alias string) SelectTable {
-	return newSelectTable(s, alias)
+	return newSelectTable(s, alias, nil)
 }
 
 //-----------------------------------------------------

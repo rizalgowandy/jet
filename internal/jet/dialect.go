@@ -12,6 +12,8 @@ type Dialect interface {
 	IdentifierQuoteChar() byte
 	ArgumentPlaceholder() QueryPlaceholderFunc
 	IsReservedWord(name string) bool
+	SerializeOrderBy() func(expression Expression, ascending, nullsFirst *bool) SerializerFunc
+	ValuesDefaultColumnName(index int) string
 }
 
 // SerializerFunc func
@@ -33,6 +35,8 @@ type DialectParams struct {
 	IdentifierQuoteChar        byte
 	ArgumentPlaceholder        QueryPlaceholderFunc
 	ReservedWords              []string
+	SerializeOrderBy           func(expression Expression, ascending, nullsFirst *bool) SerializerFunc
+	ValuesDefaultColumnName    func(index int) string
 }
 
 // NewDialect creates new dialect with params
@@ -46,6 +50,8 @@ func NewDialect(params DialectParams) Dialect {
 		identifierQuoteChar:        params.IdentifierQuoteChar,
 		argumentPlaceholder:        params.ArgumentPlaceholder,
 		reservedWords:              arrayOfStringsToMapOfStrings(params.ReservedWords),
+		serializeOrderBy:           params.SerializeOrderBy,
+		valuesDefaultColumnName:    params.ValuesDefaultColumnName,
 	}
 }
 
@@ -58,8 +64,8 @@ type dialectImpl struct {
 	identifierQuoteChar        byte
 	argumentPlaceholder        QueryPlaceholderFunc
 	reservedWords              map[string]bool
-
-	supportsReturning bool
+	serializeOrderBy           func(expression Expression, ascending, nullsFirst *bool) SerializerFunc
+	valuesDefaultColumnName    func(index int) string
 }
 
 func (d *dialectImpl) Name() string {
@@ -99,6 +105,14 @@ func (d *dialectImpl) ArgumentPlaceholder() QueryPlaceholderFunc {
 func (d *dialectImpl) IsReservedWord(name string) bool {
 	_, isReservedWord := d.reservedWords[strings.ToLower(name)]
 	return isReservedWord
+}
+
+func (d *dialectImpl) SerializeOrderBy() func(expression Expression, ascending, nullsFirst *bool) SerializerFunc {
+	return d.serializeOrderBy
+}
+
+func (d *dialectImpl) ValuesDefaultColumnName(index int) string {
+	return d.valuesDefaultColumnName(index)
 }
 
 func arrayOfStringsToMapOfStrings(arr []string) map[string]bool {

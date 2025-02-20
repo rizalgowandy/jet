@@ -2,6 +2,8 @@ package sqlite
 
 import (
 	"context"
+	"github.com/go-jet/jet/v2/internal/utils/ptr"
+	"github.com/go-jet/jet/v2/qrm"
 	"math/rand"
 
 	"testing"
@@ -15,9 +17,6 @@ import (
 )
 
 func TestInsertValues(t *testing.T) {
-	tx := beginSampleDBTx(t)
-	defer tx.Rollback()
-
 	insertQuery := Link.INSERT(Link.ID, Link.URL, Link.Name, Link.Description).
 		VALUES(100, "http://www.postgresqltutorial.com", "PostgreSQL Tutorial", nil).
 		VALUES(101, "http://www.google.com", "Google", "Search engine").
@@ -32,31 +31,32 @@ VALUES (?, ?, ?, ?),
 		101, "http://www.google.com", "Google", "Search engine",
 		102, "http://www.yahoo.com", "Yahoo", nil)
 
-	_, err := insertQuery.Exec(tx)
-	require.NoError(t, err)
-	requireLogged(t, insertQuery)
+	testutils.ExecuteInTxAndRollback(t, sampleDB, func(tx qrm.DB) {
+		testutils.AssertExec(t, insertQuery, tx)
+		requireLogged(t, insertQuery)
 
-	insertedLinks := []model.Link{}
+		var insertedLinks []model.Link
 
-	err = SELECT(Link.AllColumns).
-		FROM(Link).
-		WHERE(Link.ID.GT_EQ(Int(100))).
-		ORDER_BY(Link.ID).
-		Query(tx, &insertedLinks)
+		err := SELECT(Link.AllColumns).
+			FROM(Link).
+			WHERE(Link.ID.GT_EQ(Int(100))).
+			ORDER_BY(Link.ID).
+			Query(tx, &insertedLinks)
 
-	require.NoError(t, err)
-	require.Equal(t, len(insertedLinks), 3)
-	testutils.AssertDeepEqual(t, insertedLinks[0], postgreTutorial)
-	testutils.AssertDeepEqual(t, insertedLinks[1], model.Link{
-		ID:          101,
-		URL:         "http://www.google.com",
-		Name:        "Google",
-		Description: testutils.StringPtr("Search engine"),
-	})
-	testutils.AssertDeepEqual(t, insertedLinks[2], model.Link{
-		ID:   102,
-		URL:  "http://www.yahoo.com",
-		Name: "Yahoo",
+		require.NoError(t, err)
+		require.Equal(t, len(insertedLinks), 3)
+		testutils.AssertDeepEqual(t, insertedLinks[0], postgreTutorial)
+		testutils.AssertDeepEqual(t, insertedLinks[1], model.Link{
+			ID:          101,
+			URL:         "http://www.google.com",
+			Name:        "Google",
+			Description: ptr.Of("Search engine"),
+		})
+		testutils.AssertDeepEqual(t, insertedLinks[2], model.Link{
+			ID:   102,
+			URL:  "http://www.yahoo.com",
+			Name: "Yahoo",
+		})
 	})
 }
 
@@ -67,41 +67,35 @@ var postgreTutorial = model.Link{
 }
 
 func TestInsertEmptyColumnList(t *testing.T) {
-	tx := beginSampleDBTx(t)
-	defer tx.Rollback()
-
-	expectedSQL := `
-INSERT INTO link
-VALUES (100, 'http://www.postgresqltutorial.com', 'PostgreSQL Tutorial', NULL);
-`
-
 	stmt := Link.INSERT().
 		VALUES(100, "http://www.postgresqltutorial.com", "PostgreSQL Tutorial", nil)
 
-	testutils.AssertDebugStatementSql(t, stmt, expectedSQL,
+	testutils.AssertDebugStatementSql(t, stmt, `
+INSERT INTO link
+VALUES (100, 'http://www.postgresqltutorial.com', 'PostgreSQL Tutorial', NULL);
+`,
 		100, "http://www.postgresqltutorial.com", "PostgreSQL Tutorial", nil)
 
-	_, err := stmt.Exec(tx)
-	require.NoError(t, err)
-	requireLogged(t, stmt)
+	testutils.ExecuteInTxAndRollback(t, sampleDB, func(tx qrm.DB) {
+		_, err := stmt.Exec(tx)
+		require.NoError(t, err)
+		requireLogged(t, stmt)
 
-	insertedLinks := []model.Link{}
+		var insertedLinks []model.Link
 
-	err = SELECT(Link.AllColumns).
-		FROM(Link).
-		WHERE(Link.ID.GT_EQ(Int(100))).
-		ORDER_BY(Link.ID).
-		Query(tx, &insertedLinks)
+		err = SELECT(Link.AllColumns).
+			FROM(Link).
+			WHERE(Link.ID.GT_EQ(Int(100))).
+			ORDER_BY(Link.ID).
+			Query(tx, &insertedLinks)
 
-	require.NoError(t, err)
-	require.Equal(t, len(insertedLinks), 1)
-	testutils.AssertDeepEqual(t, insertedLinks[0], postgreTutorial)
+		require.NoError(t, err)
+		require.Equal(t, len(insertedLinks), 1)
+		testutils.AssertDeepEqual(t, insertedLinks[0], postgreTutorial)
+	})
 }
 
 func TestInsertModelObject(t *testing.T) {
-	tx := beginSampleDBTx(t)
-	defer tx.Rollback()
-
 	linkData := model.Link{
 		URL:  "http://www.duckduckgo.com",
 		Name: "Duck Duck go",
@@ -115,19 +109,13 @@ INSERT INTO link (url, name)
 VALUES ('http://www.duckduckgo.com', 'Duck Duck go');
 `, "http://www.duckduckgo.com", "Duck Duck go")
 
-	_, err := query.Exec(tx)
-	require.NoError(t, err)
+	testutils.ExecuteInTxAndRollback(t, sampleDB, func(tx qrm.DB) {
+		_, err := query.Exec(tx)
+		require.NoError(t, err)
+	})
 }
 
 func TestInsertModelObjectEmptyColumnList(t *testing.T) {
-	tx := beginSampleDBTx(t)
-	defer tx.Rollback()
-
-	var expectedSQL = `
-INSERT INTO link
-VALUES (1000, 'http://www.duckduckgo.com', 'Duck Duck go', NULL);
-`
-
 	linkData := model.Link{
 		ID:   1000,
 		URL:  "http://www.duckduckgo.com",
@@ -138,23 +126,18 @@ VALUES (1000, 'http://www.duckduckgo.com', 'Duck Duck go', NULL);
 		INSERT().
 		MODEL(linkData)
 
-	testutils.AssertDebugStatementSql(t, query, expectedSQL, int32(1000), "http://www.duckduckgo.com", "Duck Duck go", nil)
+	testutils.AssertDebugStatementSql(t, query, `
+INSERT INTO link
+VALUES (1000, 'http://www.duckduckgo.com', 'Duck Duck go', NULL);
+`, int32(1000), "http://www.duckduckgo.com", "Duck Duck go", nil)
 
-	_, err := query.Exec(tx)
-	require.NoError(t, err)
+	testutils.ExecuteInTxAndRollback(t, sampleDB, func(tx qrm.DB) {
+		_, err := query.Exec(tx)
+		require.NoError(t, err)
+	})
 }
 
 func TestInsertModelsObject(t *testing.T) {
-	tx := beginSampleDBTx(t)
-	defer tx.Rollback()
-
-	expectedSQL := `
-INSERT INTO link (url, name)
-VALUES ('http://www.postgresqltutorial.com', 'PostgreSQL Tutorial'),
-       ('http://www.google.com', 'Google'),
-       ('http://www.yahoo.com', 'Yahoo');
-`
-
 	tutorial := model.Link{
 		URL:  "http://www.postgresqltutorial.com",
 		Name: "PostgreSQL Tutorial",
@@ -176,27 +159,20 @@ VALUES ('http://www.postgresqltutorial.com', 'PostgreSQL Tutorial'),
 			yahoo,
 		})
 
-	testutils.AssertDebugStatementSql(t, query, expectedSQL,
+	testutils.AssertDebugStatementSql(t, query, `
+INSERT INTO link (url, name)
+VALUES ('http://www.postgresqltutorial.com', 'PostgreSQL Tutorial'),
+       ('http://www.google.com', 'Google'),
+       ('http://www.yahoo.com', 'Yahoo');
+`,
 		"http://www.postgresqltutorial.com", "PostgreSQL Tutorial",
 		"http://www.google.com", "Google",
 		"http://www.yahoo.com", "Yahoo")
 
-	_, err := query.Exec(tx)
-	require.NoError(t, err)
+	testutils.AssertExecAndRollback(t, query, sampleDB)
 }
 
 func TestInsertUsingMutableColumns(t *testing.T) {
-	tx := beginSampleDBTx(t)
-	defer tx.Rollback()
-
-	var expectedSQL = `
-INSERT INTO link (url, name, description)
-VALUES ('http://www.postgresqltutorial.com', 'PostgreSQL Tutorial', NULL),
-       ('http://www.google.com', 'Google', NULL),
-       ('http://www.google.com', 'Google', NULL),
-       ('http://www.yahoo.com', 'Yahoo', NULL);
-`
-
 	google := model.Link{
 		URL:  "http://www.google.com",
 		Name: "Google",
@@ -213,20 +189,22 @@ VALUES ('http://www.postgresqltutorial.com', 'PostgreSQL Tutorial', NULL),
 		MODEL(google).
 		MODELS([]model.Link{google, yahoo})
 
-	testutils.AssertDebugStatementSql(t, stmt, expectedSQL,
+	testutils.AssertDebugStatementSql(t, stmt, `
+INSERT INTO link (url, name, description)
+VALUES ('http://www.postgresqltutorial.com', 'PostgreSQL Tutorial', NULL),
+       ('http://www.google.com', 'Google', NULL),
+       ('http://www.google.com', 'Google', NULL),
+       ('http://www.yahoo.com', 'Yahoo', NULL);
+`,
 		"http://www.postgresqltutorial.com", "PostgreSQL Tutorial", nil,
 		"http://www.google.com", "Google", nil,
 		"http://www.google.com", "Google", nil,
 		"http://www.yahoo.com", "Yahoo", nil)
 
-	_, err := stmt.Exec(tx)
-	require.NoError(t, err)
+	testutils.AssertExecAndRollback(t, stmt, sampleDB)
 }
 
 func TestInsertQuery(t *testing.T) {
-	tx := beginSampleDBTx(t)
-	defer tx.Rollback()
-
 	var expectedSQL = `
 INSERT INTO link (url, name)
 SELECT link.url AS "link.url",
@@ -242,24 +220,22 @@ WHERE link.id = 24;
 		)
 
 	testutils.AssertDebugStatementSql(t, query, expectedSQL, int64(24))
+	testutils.ExecuteInTxAndRollback(t, sampleDB, func(tx qrm.DB) {
+		_, err := query.Exec(tx)
+		require.NoError(t, err)
 
-	_, err := query.Exec(tx)
-	require.NoError(t, err)
+		var youtubeLinks []model.Link
+		err = Link.
+			SELECT(Link.AllColumns).
+			WHERE(Link.Name.EQ(String("Bing"))).
+			Query(tx, &youtubeLinks)
 
-	youtubeLinks := []model.Link{}
-	err = Link.
-		SELECT(Link.AllColumns).
-		WHERE(Link.Name.EQ(String("Bing"))).
-		Query(tx, &youtubeLinks)
-
-	require.NoError(t, err)
-	require.Equal(t, len(youtubeLinks), 2)
+		require.NoError(t, err)
+		require.Equal(t, len(youtubeLinks), 2)
+	})
 }
 
 func TestInsert_DEFAULT_VALUES_RETURNING(t *testing.T) {
-	tx := beginSampleDBTx(t)
-	defer tx.Rollback()
-
 	stmt := Link.INSERT().
 		DEFAULT_VALUES().
 		RETURNING(Link.AllColumns)
@@ -273,24 +249,41 @@ RETURNING link.id AS "link.id",
           link.description AS "link.description";
 `)
 
-	var link model.Link
-	err := stmt.Query(tx, &link)
-	require.NoError(t, err)
+	testutils.ExecuteInTxAndRollback(t, sampleDB, func(tx qrm.DB) {
+		var link model.Link
+		err := stmt.Query(tx, &link)
+		require.NoError(t, err)
 
-	require.EqualValues(t, link, model.Link{
-		ID:          25,
-		URL:         "www.",
-		Name:        "_",
-		Description: nil,
+		require.EqualValues(t, link, model.Link{
+			ID:          25,
+			URL:         "www.",
+			Name:        "_",
+			Description: nil,
+		})
 	})
 }
 
 func TestInsertOnConflict(t *testing.T) {
 
 	t.Run("do nothing", func(t *testing.T) {
-		tx := beginSampleDBTx(t)
-		defer tx.Rollback()
+		link := model.Link{ID: rand.Int31()}
 
+		stmt := Link.INSERT(Link.AllColumns).
+			MODEL(link).
+			MODEL(link).
+			ON_CONFLICT().DO_NOTHING()
+
+		testutils.AssertStatementSql(t, stmt, `
+INSERT INTO link (id, url, name, description)
+VALUES (?, ?, ?, ?),
+       (?, ?, ?, ?)
+ON CONFLICT DO NOTHING;
+`)
+		testutils.AssertExecAndRollback(t, stmt, sampleDB, 1)
+		requireLogged(t, stmt)
+	})
+
+	t.Run("do nothing with index", func(t *testing.T) {
 		link := model.Link{ID: rand.Int31()}
 
 		stmt := Link.INSERT(Link.AllColumns).
@@ -304,14 +297,11 @@ VALUES (?, ?, ?, ?),
        (?, ?, ?, ?)
 ON CONFLICT (id) DO NOTHING;
 `)
-		testutils.AssertExec(t, stmt, tx, 1)
+		testutils.AssertExecAndRollback(t, stmt, sampleDB, 1)
 		requireLogged(t, stmt)
 	})
 
 	t.Run("do update", func(t *testing.T) {
-		tx := beginSampleDBTx(t)
-		defer tx.Rollback()
-
 		stmt := Link.INSERT(Link.ID, Link.URL, Link.Name, Link.Description).
 			VALUES(21, "http://www.postgresqltutorial.com", "PostgreSQL Tutorial", nil).
 			VALUES(22, "http://www.postgresqltutorial.com", "PostgreSQL Tutorial", nil).
@@ -336,14 +326,11 @@ RETURNING link.id AS "link.id",
           link.description AS "link.description";
 `)
 
-		testutils.AssertExec(t, stmt, tx)
+		testutils.AssertExecAndRollback(t, stmt, sampleDB)
 		requireLogged(t, stmt)
 	})
 
 	t.Run("do update complex", func(t *testing.T) {
-		tx := beginSampleDBTx(t)
-		defer tx.Rollback()
-
 		stmt := Link.INSERT(Link.ID, Link.URL, Link.Name, Link.Description).
 			VALUES(21, "http://www.postgresqltutorial.com", "PostgreSQL Tutorial", nil).
 			ON_CONFLICT(Link.ID).
@@ -370,7 +357,22 @@ ON CONFLICT (id) WHERE (id * 2) > 10 DO UPDATE
        WHERE link.description IS NOT NULL;
 `)
 
-		testutils.AssertExec(t, stmt, tx)
+		testutils.AssertExecAndRollback(t, stmt, sampleDB)
+		requireLogged(t, stmt)
+	})
+
+	t.Run("nil action removes ON CONFLICT clause", func(t *testing.T) {
+		link := model.Link{ID: rand.Int31()}
+
+		stmt := Link.INSERT(Link.AllColumns).
+			MODEL(link).
+			ON_CONFLICT().DO_UPDATE(nil)
+
+		testutils.AssertStatementSql(t, stmt, `
+INSERT INTO link (id, url, name, description)
+VALUES (?, ?, ?, ?);
+`)
+		testutils.AssertExecAndRollback(t, stmt, sampleDB, 1)
 		requireLogged(t, stmt)
 	})
 }
@@ -384,10 +386,16 @@ func TestInsertContextDeadlineExceeded(t *testing.T) {
 
 	time.Sleep(10 * time.Millisecond)
 
-	dest := []model.Link{}
-	err := stmt.QueryContext(ctx, sampleDB, &dest)
-	require.Error(t, err, "context deadline exceeded")
+	var dest []model.Link
 
-	_, err = stmt.ExecContext(ctx, db)
-	require.Error(t, err, "context deadline exceeded")
+	testutils.ExecuteInTxAndRollback(t, sampleDB, func(tx qrm.DB) {
+		err := stmt.QueryContext(ctx, tx, &dest)
+		require.Error(t, err, "context deadline exceeded")
+	})
+
+	testutils.ExecuteInTxAndRollback(t, sampleDB, func(tx qrm.DB) {
+		_, err := stmt.ExecContext(ctx, tx)
+		require.Error(t, err, "context deadline exceeded")
+	})
+
 }

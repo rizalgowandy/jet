@@ -44,6 +44,10 @@ func Serialize(exp Serializer, statementType StatementType, out *SQLBuilder, opt
 	exp.serialize(statementType, out, options...)
 }
 
+func SerializeForOrderBy(exp Expression, statementType StatementType, out *SQLBuilder) {
+	exp.serializeForOrderBy(statementType, out)
+}
+
 func contains(options []SerializeOption, option SerializeOption) bool {
 	for _, opt := range options {
 		if opt == option {
@@ -95,4 +99,11 @@ func (s serializerImpl) serialize(statement StatementType, out *SQLBuilder, opti
 	for _, clause := range s.Clauses {
 		clause.Serialize(statement, out, FallTrough(options)...)
 	}
+}
+
+// Token can be used to construct complex custom expressions
+type Token string
+
+func (t Token) serialize(statement StatementType, out *SQLBuilder, options ...SerializeOption) {
+	out.WriteString(string(t))
 }

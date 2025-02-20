@@ -15,9 +15,9 @@ var (
 	OR = jet.OR
 )
 
-// ROW is construct one table row from list of expressions.
-func ROW(expressions ...Expression) Expression {
-	return jet.NewFunc("", expressions, nil)
+// ROW function is used to create a tuple value that consists of a set of expressions or column values.
+func ROW(expressions ...Expression) RowExpression {
+	return jet.WRAP(Dialect, expressions...)
 }
 
 // ------------------ Mathematical functions ---------------//
@@ -342,7 +342,13 @@ func UNIX_TIMESTAMP(str StringExpression) TimestampExpression {
 	return jet.NewTimestampFunc("UNIX_TIMESTAMP", str)
 }
 
-//----------- Comparison operators ---------------//
+// --------------- Conditional Expressions Functions -------------//
+
+// COALESCE function returns the first of its arguments that is not null.
+var COALESCE = jet.COALESCE
+
+// NULLIF function returns a null value if value1 equals value2; otherwise it returns value1.
+var NULLIF = jet.NULLIF
 
 // EXISTS checks for existence of the rows in subQuery
 var EXISTS = jet.EXISTS

@@ -3,29 +3,30 @@ package postgres
 import (
 	"context"
 	"github.com/go-jet/jet/v2/internal/testutils"
+	"github.com/go-jet/jet/v2/internal/utils/ptr"
 	. "github.com/go-jet/jet/v2/postgres"
 	"github.com/go-jet/jet/v2/tests/.gentestdata/jetdb/chinook/model"
 	. "github.com/go-jet/jet/v2/tests/.gentestdata/jetdb/chinook/table"
+	"github.com/go-jet/jet/v2/tests/.gentestdata/jetdb/chinook2/table"
 	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
 )
 
-func TestSelect(t *testing.T) {
-	stmt := Album.
-		SELECT(Album.AllColumns).
+func TestSelectAlbum(t *testing.T) {
+	stmt := SELECT(Album.AllColumns).
+		FROM(Album).
 		ORDER_BY(Album.AlbumId.ASC())
-
-	//fmt.Println(stmt.DebugSql())
 
 	testutils.AssertDebugStatementSql(t, stmt, `
 SELECT "Album"."AlbumId" AS "Album.AlbumId",
      "Album"."Title" AS "Album.Title",
-     "Album"."ArtistId" AS "Album.ArtistId"
+     "Album"."ArtistId" AS "Album.ArtistId",
+     "Album"."Type" AS "Album.Type"
 FROM chinook."Album"
 ORDER BY "Album"."AlbumId" ASC;
 `)
-	dest := []model.Album{}
+	var dest []model.Album
 
 	err := stmt.Query(db, &dest)
 
@@ -70,6 +71,7 @@ SELECT "Artist"."ArtistId" AS "Artist.ArtistId",
      "Album"."AlbumId" AS "Album.AlbumId",
      "Album"."Title" AS "Album.Title",
      "Album"."ArtistId" AS "Album.ArtistId",
+     "Album"."Type" AS "Album.Type",
      "Track"."TrackId" AS "Track.TrackId",
      "Track"."Name" AS "Track.Name",
      "Track"."AlbumId" AS "Track.AlbumId",
@@ -118,6 +120,7 @@ ORDER BY "Artist"."ArtistId", "Album"."AlbumId", "Track"."TrackId";
 				"AlbumId": 8,
 				"Title": "Warner 25 Anos",
 				"ArtistId": 6,
+				"Type": "Studio",
 				"Tracks": [
 					{
 						"TrackId": 75,
@@ -153,6 +156,7 @@ ORDER BY "Artist"."ArtistId", "Album"."AlbumId", "Track"."TrackId";
 				"AlbumId": 13,
 				"Title": "The Best Of Billy Cobham",
 				"ArtistId": 10,
+				"Type": "Studio",
 				"Tracks": [
 					{
 						"TrackId": 123,
@@ -188,34 +192,36 @@ func TestJoinEverything(t *testing.T) {
 
 	manager := Employee.AS("Manager")
 
-	stmt := Artist.
-		LEFT_JOIN(Album, Artist.ArtistId.EQ(Album.ArtistId)).
-		LEFT_JOIN(Track, Track.AlbumId.EQ(Album.AlbumId)).
-		LEFT_JOIN(Genre, Genre.GenreId.EQ(Track.GenreId)).
-		LEFT_JOIN(MediaType, MediaType.MediaTypeId.EQ(Track.MediaTypeId)).
-		LEFT_JOIN(PlaylistTrack, PlaylistTrack.TrackId.EQ(Track.TrackId)).
-		LEFT_JOIN(Playlist, Playlist.PlaylistId.EQ(PlaylistTrack.PlaylistId)).
-		LEFT_JOIN(InvoiceLine, InvoiceLine.TrackId.EQ(Track.TrackId)).
-		LEFT_JOIN(Invoice, Invoice.InvoiceId.EQ(InvoiceLine.InvoiceId)).
-		LEFT_JOIN(Customer, Customer.CustomerId.EQ(Invoice.CustomerId)).
-		LEFT_JOIN(Employee, Employee.EmployeeId.EQ(Customer.SupportRepId)).
-		LEFT_JOIN(manager, manager.EmployeeId.EQ(Employee.ReportsTo)).
-		SELECT(
-			Artist.AllColumns,
-			Album.AllColumns,
-			Track.AllColumns,
-			Genre.AllColumns,
-			MediaType.AllColumns,
-			PlaylistTrack.AllColumns,
-			Playlist.AllColumns,
-			Invoice.AllColumns,
-			Customer.AllColumns,
-			Employee.AllColumns,
-			manager.AllColumns,
-		).
-		ORDER_BY(Artist.ArtistId, Album.AlbumId, Track.TrackId,
-			Genre.GenreId, MediaType.MediaTypeId, Playlist.PlaylistId,
-			Invoice.InvoiceId, Customer.CustomerId)
+	stmt := SELECT(
+		Artist.AllColumns,
+		Album.AllColumns,
+		Track.AllColumns,
+		Genre.AllColumns,
+		MediaType.AllColumns,
+		PlaylistTrack.AllColumns,
+		Playlist.AllColumns,
+		Invoice.AllColumns,
+		Customer.AllColumns,
+		Employee.AllColumns,
+		manager.AllColumns,
+	).FROM(
+		Artist.
+			LEFT_JOIN(Album, Artist.ArtistId.EQ(Album.ArtistId)).
+			LEFT_JOIN(Track, Track.AlbumId.EQ(Album.AlbumId)).
+			LEFT_JOIN(Genre, Genre.GenreId.EQ(Track.GenreId)).
+			LEFT_JOIN(MediaType, MediaType.MediaTypeId.EQ(Track.MediaTypeId)).
+			LEFT_JOIN(PlaylistTrack, PlaylistTrack.TrackId.EQ(Track.TrackId)).
+			LEFT_JOIN(Playlist, Playlist.PlaylistId.EQ(PlaylistTrack.PlaylistId)).
+			LEFT_JOIN(InvoiceLine, InvoiceLine.TrackId.EQ(Track.TrackId)).
+			LEFT_JOIN(Invoice, Invoice.InvoiceId.EQ(InvoiceLine.InvoiceId)).
+			LEFT_JOIN(Customer, Customer.CustomerId.EQ(Invoice.CustomerId)).
+			LEFT_JOIN(Employee, Employee.EmployeeId.EQ(Customer.SupportRepId)).
+			LEFT_JOIN(manager, manager.EmployeeId.EQ(Employee.ReportsTo)),
+	).ORDER_BY(
+		Artist.ArtistId, Album.AlbumId, Track.TrackId,
+		Genre.GenreId, MediaType.MediaTypeId, Playlist.PlaylistId,
+		Invoice.InvoiceId, Customer.CustomerId,
+	)
 
 	var dest []struct { //list of all artist
 		model.Artist
@@ -254,6 +260,7 @@ SELECT "Artist"."ArtistId" AS "Artist.ArtistId",
      "Album"."AlbumId" AS "Album.AlbumId",
      "Album"."Title" AS "Album.Title",
      "Album"."ArtistId" AS "Album.ArtistId",
+     "Album"."Type" AS "Album.Type",
      "Track"."TrackId" AS "Track.TrackId",
      "Track"."Name" AS "Track.Name",
      "Track"."AlbumId" AS "Track.AlbumId",
@@ -398,11 +405,11 @@ FROM (
           SELECT "subQuery1"."Artist.ArtistId" AS "Artist.ArtistId",
                "subQuery1"."Artist.Name" AS "Artist.Name",
                "subQuery1".custom_column_1 AS "custom_column_1",
-               $1 AS "custom_column_2"
+               $1::text AS "custom_column_2"
           FROM (
                     SELECT "Artist"."ArtistId" AS "Artist.ArtistId",
                          "Artist"."Name" AS "Artist.Name",
-                         $2 AS "custom_column_1"
+                         $2::text AS "custom_column_1"
                     FROM chinook."Artist"
                     ORDER BY "Artist"."ArtistId" ASC
                ) AS "subQuery1"
@@ -449,7 +456,7 @@ FROM (
 	require.Len(t, dest, 275)
 	require.Equal(t, dest[0].Artist1.Artist, model.Artist{
 		ArtistId: 1,
-		Name:     testutils.StringPtr("AC/DC"),
+		Name:     ptr.Of("AC/DC"),
 	})
 	require.Equal(t, dest[0].Artist1.CustomColumn1, "custom_column_1")
 	require.Equal(t, dest[0].Artist1.CustomColumn2, "custom_column_2")
@@ -594,17 +601,19 @@ func TestSelfJoin(t *testing.T) {
 
 	manager := Employee.AS("Manager")
 
-	stmt := Employee.
-		LEFT_JOIN(manager, Employee.ReportsTo.EQ(manager.EmployeeId)).
-		SELECT(
-			Employee.EmployeeId,
-			Employee.FirstName,
-			Employee.LastName,
-			manager.EmployeeId,
-			manager.FirstName,
-			manager.LastName,
-		).
-		ORDER_BY(Employee.EmployeeId)
+	stmt := SELECT(
+		Employee.EmployeeId,
+		Employee.FirstName,
+		Employee.LastName,
+		manager.EmployeeId,
+		manager.FirstName,
+		manager.LastName,
+	).FROM(
+		Employee.
+			LEFT_JOIN(manager, Employee.ReportsTo.EQ(manager.EmployeeId)),
+	).ORDER_BY(
+		Employee.EmployeeId,
+	)
 
 	testutils.AssertDebugStatementSql(t, stmt, `
 SELECT "Employee"."EmployeeId" AS "Employee.EmployeeId",
@@ -678,7 +687,53 @@ ORDER BY "Employee"."EmployeeId";
 	}
 ]
 `)
+}
 
+func TestMultipleNestedAliasedSlices(t *testing.T) {
+	manager := Employee.AS("manager")
+	managerEmployees := Employee.AS("manager_employees")
+	managerEmployeesEmployees := Employee.AS("manager_employees_employees")
+	managerEmployeeEmployeesCustomers := Customer.AS("manager_employee_employee_customers")
+
+	trimmedCustomersResultSet := managerEmployeeEmployeesCustomers.CustomerId.BETWEEN(Int(37), Int(42))
+
+	stmt := SELECT(
+		manager.AllColumns,
+		managerEmployees.AllColumns,
+		managerEmployeesEmployees.AllColumns,
+		managerEmployeeEmployeesCustomers.AllColumns,
+	).FROM(
+		manager.
+			LEFT_JOIN(managerEmployees, managerEmployees.ReportsTo.EQ(manager.EmployeeId)).
+			LEFT_JOIN(managerEmployeesEmployees, managerEmployeesEmployees.ReportsTo.EQ(managerEmployees.EmployeeId)).
+			LEFT_JOIN(managerEmployeeEmployeesCustomers,
+				managerEmployeeEmployeesCustomers.SupportRepId.EQ(managerEmployeesEmployees.EmployeeId).
+					AND(trimmedCustomersResultSet)),
+	).WHERE(
+		manager.ReportsTo.IS_NULL(),
+	).ORDER_BY(
+		manager.EmployeeId.ASC(),
+		managerEmployees.EmployeeId.ASC(),
+		managerEmployeesEmployees.EmployeeId.ASC(),
+		managerEmployeeEmployeesCustomers.CustomerId.ASC(),
+	)
+
+	var dest []struct {
+		model.Employee   `alias:"manager"`
+		Employees        []model.Employee `alias:"manager_employees"`
+		EmployeesCustom1 []struct {
+			model.Employee   `alias:"manager_employees"`
+			Employees1       []model.Employee `alias:"manager_employees_employees"`
+			EmployeesCustom2 []struct {
+				model.Employee `alias:"manager_employees_employees"`
+				Customers2     []model.Customer `alias:"manager_employee_employee_customers"`
+			}
+		}
+	}
+
+	err := stmt.Query(db, &dest)
+	require.NoError(t, err)
+	testutils.AssertJSON(t, dest, testMultipleNestedAliasedSlices)
 }
 
 func TestUnionForQuotedNames(t *testing.T) {
@@ -686,15 +741,17 @@ func TestUnionForQuotedNames(t *testing.T) {
 	stmt := UNION_ALL(
 		Album.SELECT(Album.AllColumns).WHERE(Album.AlbumId.EQ(Int(1))),
 		Album.SELECT(Album.AllColumns).WHERE(Album.AlbumId.EQ(Int(2))),
-	).
-		ORDER_BY(Album.AlbumId)
+	).ORDER_BY(
+		Album.AlbumId,
+	)
 
 	//fmt.Println(stmt.DebugSql())
 	testutils.AssertDebugStatementSql(t, stmt, `
 (
      SELECT "Album"."AlbumId" AS "Album.AlbumId",
           "Album"."Title" AS "Album.Title",
-          "Album"."ArtistId" AS "Album.ArtistId"
+          "Album"."ArtistId" AS "Album.ArtistId",
+          "Album"."Type" AS "Album.Type"
      FROM chinook."Album"
      WHERE "Album"."AlbumId" = 1
 )
@@ -702,7 +759,8 @@ UNION ALL
 (
      SELECT "Album"."AlbumId" AS "Album.AlbumId",
           "Album"."Title" AS "Album.Title",
-          "Album"."ArtistId" AS "Album.ArtistId"
+          "Album"."ArtistId" AS "Album.ArtistId",
+          "Album"."Type" AS "Album.Type"
      FROM chinook."Album"
      WHERE "Album"."AlbumId" = 2
 )
@@ -721,11 +779,16 @@ ORDER BY "Album.AlbumId";
 }
 
 func TestQueryWithContext(t *testing.T) {
+	if sourceIsCockroachDB() && !isPgxDriver() {
+		return // context cancellation doesn't work for pq driver
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Microsecond)
 	defer cancel()
 
-	dest := []model.Album{}
+	time.Sleep(1 * time.Millisecond)
+
+	var dest []model.Album
 
 	err := Album.
 		CROSS_JOIN(Track).
@@ -737,6 +800,9 @@ func TestQueryWithContext(t *testing.T) {
 }
 
 func TestExecWithContext(t *testing.T) {
+	if sourceIsCockroachDB() && !isPgxDriver() {
+		return // context cancellation doesn't work for pq driver
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -751,33 +817,39 @@ func TestExecWithContext(t *testing.T) {
 }
 
 func TestSubQueriesForQuotedNames(t *testing.T) {
-	first10Artist := Artist.
-		SELECT(Artist.AllColumns).
+	first10Artist := SELECT(Artist.AllColumns).
+		FROM(Artist).
 		ORDER_BY(Artist.ArtistId).
 		LIMIT(10).
 		AsTable("first10Artist")
 
 	artistID := Artist.ArtistId.From(first10Artist)
 
-	first10Albums := Album.
-		SELECT(Album.AllColumns).
+	first10Albums := SELECT(Album.AllColumns).
+		FROM(Album).
 		ORDER_BY(Album.AlbumId).
 		LIMIT(10).
 		AsTable("first10Albums")
 
 	albumArtistID := Album.ArtistId.From(first10Albums)
 
-	stmt := first10Artist.
-		INNER_JOIN(first10Albums, artistID.EQ(albumArtistID)).
-		SELECT(first10Artist.AllColumns(), first10Albums.AllColumns()).
-		ORDER_BY(artistID)
+	stmt := SELECT(
+		first10Artist.AllColumns(),
+		first10Albums.AllColumns(),
+	).FROM(
+		first10Artist.
+			INNER_JOIN(first10Albums, artistID.EQ(albumArtistID)),
+	).ORDER_BY(
+		artistID,
+	)
 
 	testutils.AssertDebugStatementSql(t, stmt, `
 SELECT "first10Artist"."Artist.ArtistId" AS "Artist.ArtistId",
      "first10Artist"."Artist.Name" AS "Artist.Name",
      "first10Albums"."Album.AlbumId" AS "Album.AlbumId",
      "first10Albums"."Album.Title" AS "Album.Title",
-     "first10Albums"."Album.ArtistId" AS "Album.ArtistId"
+     "first10Albums"."Album.ArtistId" AS "Album.ArtistId",
+     "first10Albums"."Album.Type" AS "Album.Type"
 FROM (
           SELECT "Artist"."ArtistId" AS "Artist.ArtistId",
                "Artist"."Name" AS "Artist.Name"
@@ -788,7 +860,8 @@ FROM (
      INNER JOIN (
           SELECT "Album"."AlbumId" AS "Album.AlbumId",
                "Album"."Title" AS "Album.Title",
-               "Album"."ArtistId" AS "Album.ArtistId"
+               "Album"."ArtistId" AS "Album.ArtistId",
+               "Album"."Type" AS "Album.Type"
           FROM chinook."Album"
           ORDER BY "Album"."AlbumId"
           LIMIT 10
@@ -803,42 +876,48 @@ ORDER BY "first10Artist"."Artist.ArtistId";
 	}
 
 	err := stmt.Query(db, &dest)
-
 	require.NoError(t, err)
+	require.Len(t, dest, 8)
 }
 
-func Test_SchemaRename(t *testing.T) {
+func TestMultiTenantDifferentSchema(t *testing.T) {
 
 	Artist2 := Artist.FromSchema("chinook2")
 	Album2 := Album.FromSchema("chinook2")
 
-	first10Artist := Artist2.
-		SELECT(Artist2.AllColumns).
+	first10Artist := SELECT(Artist2.AllColumns).
+		FROM(Artist2).
 		ORDER_BY(Artist2.ArtistId).
 		LIMIT(10).
 		AsTable("first10Artist")
 
 	artistID := Artist2.ArtistId.From(first10Artist)
 
-	first10Albums := Album2.
-		SELECT(Album2.AllColumns).
+	first10Albums := SELECT(Album2.AllColumns).
+		FROM(Album2).
 		ORDER_BY(Album2.AlbumId).
 		LIMIT(10).
 		AsTable("first10Albums")
 
 	albumArtistID := Album2.ArtistId.From(first10Albums)
 
-	stmt := SELECT(first10Artist.AllColumns(), first10Albums.AllColumns()).
-		FROM(first10Artist.
-			INNER_JOIN(first10Albums, artistID.EQ(albumArtistID))).
-		ORDER_BY(artistID)
+	stmt := SELECT(
+		first10Artist.AllColumns(),
+		first10Albums.AllColumns(),
+	).FROM(
+		first10Artist.
+			INNER_JOIN(first10Albums, artistID.EQ(albumArtistID)),
+	).ORDER_BY(
+		artistID,
+	)
 
 	testutils.AssertDebugStatementSql(t, stmt, `
 SELECT "first10Artist"."Artist.ArtistId" AS "Artist.ArtistId",
      "first10Artist"."Artist.Name" AS "Artist.Name",
      "first10Albums"."Album.AlbumId" AS "Album.AlbumId",
      "first10Albums"."Album.Title" AS "Album.Title",
-     "first10Albums"."Album.ArtistId" AS "Album.ArtistId"
+     "first10Albums"."Album.ArtistId" AS "Album.ArtistId",
+     "first10Albums"."Album.Type" AS "Album.Type"
 FROM (
           SELECT "Artist"."ArtistId" AS "Artist.ArtistId",
                "Artist"."Name" AS "Artist.Name"
@@ -849,7 +928,8 @@ FROM (
      INNER JOIN (
           SELECT "Album"."AlbumId" AS "Album.AlbumId",
                "Album"."Title" AS "Album.Title",
-               "Album"."ArtistId" AS "Album.ArtistId"
+               "Album"."ArtistId" AS "Album.ArtistId",
+               "Album"."Type" AS "Album.Type"
           FROM chinook2."Album"
           ORDER BY "Album"."AlbumId"
           LIMIT 10
@@ -872,25 +952,251 @@ ORDER BY "first10Artist"."Artist.ArtistId";
 	require.Equal(t, dest[0].Album[0].Title, "Plays Metallica By Four Cellos")
 }
 
+func TestUseSchema(t *testing.T) {
+	UseSchema("chinook2")
+	defer UseSchema("chinook")
+
+	stmt := SELECT(
+		Artist.AllColumns,
+	).FROM(
+		Artist,
+	).WHERE(Artist.ArtistId.EQ(Int(11)))
+
+	testutils.AssertDebugStatementSql(t, stmt, `
+SELECT "Artist"."ArtistId" AS "Artist.ArtistId",
+     "Artist"."Name" AS "Artist.Name"
+FROM chinook2."Artist"
+WHERE "Artist"."ArtistId" = 11;
+`)
+
+	var artist model.Artist
+
+	err := stmt.Query(db, &artist)
+	require.NoError(t, err)
+
+	testutils.AssertJSON(t, artist, `
+{
+	"ArtistId": 11,
+	"Name": "Black Label Society"
+}
+`)
+}
+
+func TestMultiTenantSameSchemaDifferentTablePrefix(t *testing.T) {
+
+	var selectAlbumsFrom = func(tenant string) SelectStatement {
+		Album := table.Album.WithPrefix(tenant)
+
+		return SELECT(
+			Album.AlbumId,
+			Album.Title,
+			Album.ArtistId,
+		).FROM(
+			Album,
+		).ORDER_BY(
+			Album.AlbumId.ASC(),
+		).LIMIT(3)
+	}
+
+	t.Run("tenant1", func(t *testing.T) {
+		stmt := selectAlbumsFrom("tenant1.")
+
+		testutils.AssertStatementSql(t, stmt, `
+SELECT "Album"."AlbumId" AS "Album.AlbumId",
+     "Album"."Title" AS "Album.Title",
+     "Album"."ArtistId" AS "Album.ArtistId"
+FROM chinook2."tenant1.Album" AS "Album"
+ORDER BY "Album"."AlbumId" ASC
+LIMIT $1;
+`)
+
+		var albums []model.Album
+		err := stmt.Query(db, &albums)
+		require.NoError(t, err)
+
+		testutils.AssertJSON(t, albums, `
+[
+	{
+		"AlbumId": 80,
+		"Title": "In Your Honor [Disc 2]",
+		"ArtistId": 84,
+		"Type": ""
+	},
+	{
+		"AlbumId": 81,
+		"Title": "One By One",
+		"ArtistId": 84,
+		"Type": ""
+	},
+	{
+		"AlbumId": 82,
+		"Title": "The Colour And The Shape",
+		"ArtistId": 84,
+		"Type": ""
+	}
+]
+`)
+	})
+
+	t.Run("tenant2", func(t *testing.T) {
+		stmt := selectAlbumsFrom("tenant2.")
+
+		testutils.AssertStatementSql(t, stmt, `
+SELECT "Album"."AlbumId" AS "Album.AlbumId",
+     "Album"."Title" AS "Album.Title",
+     "Album"."ArtistId" AS "Album.ArtistId"
+FROM chinook2."tenant2.Album" AS "Album"
+ORDER BY "Album"."AlbumId" ASC
+LIMIT $1;
+`)
+
+		var albums []model.Album
+		err := stmt.Query(db, &albums)
+		require.NoError(t, err)
+		testutils.AssertJSON(t, albums, `
+[
+	{
+		"AlbumId": 152,
+		"Title": "Master Of Puppets",
+		"ArtistId": 50,
+		"Type": ""
+	},
+	{
+		"AlbumId": 153,
+		"Title": "ReLoad",
+		"ArtistId": 50,
+		"Type": ""
+	},
+	{
+		"AlbumId": 154,
+		"Title": "Ride The Lightning",
+		"ArtistId": 50,
+		"Type": ""
+	}
+]
+`)
+	})
+}
+
+func TestMultiTenantSameSchemaDifferentTableSuffix(t *testing.T) {
+
+	var selectAlbumsFrom = func(tenant string) SelectStatement {
+		Album := table.Album.WithSuffix(tenant)
+
+		return SELECT(
+			Album.AlbumId,
+			Album.Title,
+			Album.ArtistId,
+		).FROM(
+			Album,
+		).ORDER_BY(
+			Album.AlbumId.ASC(),
+		).LIMIT(3)
+	}
+
+	t.Run("tenant1", func(t *testing.T) {
+		stmt := selectAlbumsFrom(".tenant1")
+
+		testutils.AssertStatementSql(t, stmt, `
+SELECT "Album"."AlbumId" AS "Album.AlbumId",
+     "Album"."Title" AS "Album.Title",
+     "Album"."ArtistId" AS "Album.ArtistId"
+FROM chinook2."Album.tenant1" AS "Album"
+ORDER BY "Album"."AlbumId" ASC
+LIMIT $1;
+`)
+
+		var albums []model.Album
+		err := stmt.Query(db, &albums)
+		require.NoError(t, err)
+		testutils.AssertJSON(t, albums, `
+[
+	{
+		"AlbumId": 80,
+		"Title": "In Your Honor [Disc 2]",
+		"ArtistId": 84,
+		"Type": ""
+	},
+	{
+		"AlbumId": 81,
+		"Title": "One By One",
+		"ArtistId": 84,
+		"Type": ""
+	},
+	{
+		"AlbumId": 82,
+		"Title": "The Colour And The Shape",
+		"ArtistId": 84,
+		"Type": ""
+	}
+]
+`)
+	})
+
+	t.Run("tenant2", func(t *testing.T) {
+		stmt := selectAlbumsFrom(".tenant2")
+
+		testutils.AssertStatementSql(t, stmt, `
+SELECT "Album"."AlbumId" AS "Album.AlbumId",
+     "Album"."Title" AS "Album.Title",
+     "Album"."ArtistId" AS "Album.ArtistId"
+FROM chinook2."Album.tenant2" AS "Album"
+ORDER BY "Album"."AlbumId" ASC
+LIMIT $1;
+`)
+
+		var albums []model.Album
+		err := stmt.Query(db, &albums)
+		require.NoError(t, err)
+		testutils.AssertJSON(t, albums, `
+[
+	{
+		"AlbumId": 152,
+		"Title": "Master Of Puppets",
+		"ArtistId": 50,
+		"Type": ""
+	},
+	{
+		"AlbumId": 153,
+		"Title": "ReLoad",
+		"ArtistId": 50,
+		"Type": ""
+	},
+	{
+		"AlbumId": 154,
+		"Title": "Ride The Lightning",
+		"ArtistId": 50,
+		"Type": ""
+	}
+]
+`)
+	})
+}
+
 var album1 = model.Album{
 	AlbumId:  1,
 	Title:    "For Those About To Rock We Salute You",
 	ArtistId: 1,
+	Type:     model.AlbumType_Studio,
 }
 
 var album2 = model.Album{
 	AlbumId:  2,
 	Title:    "Balls to the Wall",
 	ArtistId: 2,
+	Type:     model.AlbumType_Studio,
 }
 
 var album347 = model.Album{
 	AlbumId:  347,
 	Title:    "Koyaanisqatsi (Soundtrack from the Motion Picture)",
 	ArtistId: 275,
+	Type:     model.AlbumType_Studio,
 }
 
 func TestAggregateFunc(t *testing.T) {
+	skipForCockroachDB(t)
+
 	stmt := SELECT(
 		PERCENTILE_DISC(Float(0.1)).WITHIN_GROUP_ORDER_BY(Invoice.InvoiceId).AS("percentile_disc_1"),
 		PERCENTILE_DISC(Invoice.Total.DIV(Float(100))).WITHIN_GROUP_ORDER_BY(Invoice.InvoiceDate.ASC()).AS("percentile_disc_2"),

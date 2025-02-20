@@ -2,6 +2,8 @@ package mysql
 
 import (
 	"context"
+	"github.com/go-jet/jet/v2/postgres"
+	"github.com/go-jet/jet/v2/qrm"
 	"strings"
 	"testing"
 	"time"
@@ -217,16 +219,385 @@ GROUP BY payment.customer_id;
 
 }
 
+func TestGroupByWithRollup(t *testing.T) {
+	skipForMariaDB(t)
+
+	stmt := SELECT(
+		Inventory.FilmID.AS("film_id"),
+		Inventory.StoreID.AS("store_id"),
+		GROUPING(Inventory.FilmID).AS("grouping_film_id"),
+		GROUPING(Inventory.FilmID, Inventory.StoreID).AS("grouping_film_id_store_id"),
+		COUNT(STAR).AS("count"),
+	).FROM(
+		Inventory,
+	).WHERE(
+		Inventory.FilmID.IN(Int(2), Int(3)),
+	).GROUP_BY(
+		WITH_ROLLUP(Inventory.FilmID, Inventory.StoreID),
+	).ORDER_BY(
+		Inventory.FilmID,
+		Inventory.StoreID,
+	)
+
+	testutils.AssertDebugStatementSql(t, stmt, `
+SELECT inventory.film_id AS "film_id",
+     inventory.store_id AS "store_id",
+     GROUPING(inventory.film_id) AS "grouping_film_id",
+     GROUPING(inventory.film_id, inventory.store_id) AS "grouping_film_id_store_id",
+     COUNT(*) AS "count"
+FROM dvds.inventory
+WHERE inventory.film_id IN (2, 3)
+GROUP BY inventory.film_id, inventory.store_id WITH ROLLUP
+ORDER BY inventory.film_id, inventory.store_id;
+`)
+
+	var dest []struct {
+		FilmID                int
+		StoreID               int
+		GroupingFilmID        int
+		GroupingFilmIDStoreID int
+	}
+
+	err := stmt.Query(db, &dest)
+	require.NoError(t, err)
+
+	testutils.AssertJSON(t, dest, `
+[
+	{
+		"FilmID": 0,
+		"StoreID": 0,
+		"GroupingFilmID": 1,
+		"GroupingFilmIDStoreID": 3
+	},
+	{
+		"FilmID": 2,
+		"StoreID": 0,
+		"GroupingFilmID": 0,
+		"GroupingFilmIDStoreID": 1
+	},
+	{
+		"FilmID": 2,
+		"StoreID": 2,
+		"GroupingFilmID": 0,
+		"GroupingFilmIDStoreID": 0
+	},
+	{
+		"FilmID": 3,
+		"StoreID": 0,
+		"GroupingFilmID": 0,
+		"GroupingFilmIDStoreID": 1
+	},
+	{
+		"FilmID": 3,
+		"StoreID": 2,
+		"GroupingFilmID": 0,
+		"GroupingFilmIDStoreID": 0
+	}
+]
+`)
+}
+
+func TestOrderBy(t *testing.T) {
+	// NULLS_FIRST and NULLS_LAST are simulated using IS_NULL, ...
+
+	ensureNullsFirstRentalResult := func(t *testing.T, stmt postgres.Statement, asc bool) {
+		var dest []model.Rental
+
+		err := stmt.Query(db, &dest)
+		require.NoError(t, err)
+		require.Len(t, dest, 200)
+		require.Nil(t, dest[0].ReturnDate)
+		require.NotNil(t, dest[199].ReturnDate)
+
+		if asc {
+			require.True(t, dest[198].ReturnDate.Before(*dest[199].ReturnDate))
+		} else {
+			require.True(t, dest[199].ReturnDate.Before(*dest[198].ReturnDate))
+		}
+	}
+
+	ensureNullsLastRentalResult := func(t *testing.T, stmt postgres.Statement, asc bool) {
+		var dest []model.Rental
+
+		err := stmt.Query(db, &dest)
+		require.NoError(t, err)
+		require.Len(t, dest, 200)
+		require.NotNil(t, dest[0].ReturnDate)
+		require.Nil(t, dest[199].ReturnDate)
+
+		if asc {
+			require.True(t, dest[0].ReturnDate.Before(*dest[1].ReturnDate))
+		} else {
+			require.True(t, dest[1].ReturnDate.Before(*dest[0].ReturnDate))
+		}
+	}
+
+	t.Run("default", func(t *testing.T) {
+		stmt := SELECT(
+			Rental.AllColumns,
+		).FROM(
+			Rental,
+		).ORDER_BY(
+			Rental.ReturnDate,
+		).LIMIT(200)
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT rental.rental_id AS "rental.rental_id",
+     rental.rental_date AS "rental.rental_date",
+     rental.inventory_id AS "rental.inventory_id",
+     rental.customer_id AS "rental.customer_id",
+     rental.return_date AS "rental.return_date",
+     rental.staff_id AS "rental.staff_id",
+     rental.last_update AS "rental.last_update"
+FROM dvds.rental
+ORDER BY rental.return_date
+LIMIT 200;
+`)
+		ensureNullsFirstRentalResult(t, stmt, true)
+	})
+
+	t.Run("NULLS FIRST", func(t *testing.T) {
+		stmt := SELECT(
+			Rental.AllColumns,
+		).FROM(
+			Rental,
+		).ORDER_BY(
+			Rental.ReturnDate.NULLS_FIRST(),
+		).LIMIT(200)
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT rental.rental_id AS "rental.rental_id",
+     rental.rental_date AS "rental.rental_date",
+     rental.inventory_id AS "rental.inventory_id",
+     rental.customer_id AS "rental.customer_id",
+     rental.return_date AS "rental.return_date",
+     rental.staff_id AS "rental.staff_id",
+     rental.last_update AS "rental.last_update"
+FROM dvds.rental
+ORDER BY rental.return_date
+LIMIT 200;
+`)
+		ensureNullsFirstRentalResult(t, stmt, true)
+	})
+
+	t.Run("NULLS LAST", func(t *testing.T) {
+		stmt := SELECT(
+			Rental.AllColumns,
+		).FROM(
+			Rental,
+		).ORDER_BY(
+			Rental.ReturnDate.NULLS_LAST(),
+		).LIMIT(200).OFFSET(15800)
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT rental.rental_id AS "rental.rental_id",
+     rental.rental_date AS "rental.rental_date",
+     rental.inventory_id AS "rental.inventory_id",
+     rental.customer_id AS "rental.customer_id",
+     rental.return_date AS "rental.return_date",
+     rental.staff_id AS "rental.staff_id",
+     rental.last_update AS "rental.last_update"
+FROM dvds.rental
+ORDER BY rental.return_date IS NULL, rental.return_date
+LIMIT 200
+OFFSET 15800;
+`)
+		ensureNullsLastRentalResult(t, stmt, true)
+	})
+
+	t.Run("ASC", func(t *testing.T) {
+		stmt := SELECT(
+			Rental.AllColumns,
+		).FROM(
+			Rental,
+		).ORDER_BY(
+			Rental.ReturnDate.ASC(),
+		).LIMIT(200)
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT rental.rental_id AS "rental.rental_id",
+     rental.rental_date AS "rental.rental_date",
+     rental.inventory_id AS "rental.inventory_id",
+     rental.customer_id AS "rental.customer_id",
+     rental.return_date AS "rental.return_date",
+     rental.staff_id AS "rental.staff_id",
+     rental.last_update AS "rental.last_update"
+FROM dvds.rental
+ORDER BY rental.return_date ASC
+LIMIT 200;
+`)
+		ensureNullsFirstRentalResult(t, stmt, true)
+	})
+
+	t.Run("ASC NULLS FIRST", func(t *testing.T) {
+		stmt := SELECT(
+			Rental.AllColumns,
+		).FROM(
+			Rental,
+		).ORDER_BY(
+			Rental.ReturnDate.ASC().NULLS_FIRST(),
+		).LIMIT(200)
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT rental.rental_id AS "rental.rental_id",
+     rental.rental_date AS "rental.rental_date",
+     rental.inventory_id AS "rental.inventory_id",
+     rental.customer_id AS "rental.customer_id",
+     rental.return_date AS "rental.return_date",
+     rental.staff_id AS "rental.staff_id",
+     rental.last_update AS "rental.last_update"
+FROM dvds.rental
+ORDER BY rental.return_date ASC
+LIMIT 200;
+`)
+
+		ensureNullsFirstRentalResult(t, stmt, true)
+	})
+
+	t.Run("ASC NULLS LAST", func(t *testing.T) {
+		stmt := SELECT(
+			Rental.AllColumns,
+		).FROM(
+			Rental,
+		).ORDER_BY(
+			Rental.ReturnDate.ASC().NULLS_LAST(),
+		).LIMIT(200).OFFSET(15800)
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT rental.rental_id AS "rental.rental_id",
+     rental.rental_date AS "rental.rental_date",
+     rental.inventory_id AS "rental.inventory_id",
+     rental.customer_id AS "rental.customer_id",
+     rental.return_date AS "rental.return_date",
+     rental.staff_id AS "rental.staff_id",
+     rental.last_update AS "rental.last_update"
+FROM dvds.rental
+ORDER BY rental.return_date IS NULL, rental.return_date ASC
+LIMIT 200
+OFFSET 15800;
+`)
+
+		ensureNullsLastRentalResult(t, stmt, true)
+	})
+
+	t.Run("DESC", func(t *testing.T) {
+		stmt := SELECT(
+			Rental.AllColumns,
+		).FROM(
+			Rental,
+		).ORDER_BY(
+			Rental.ReturnDate.DESC(),
+		).LIMIT(200).OFFSET(15800)
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT rental.rental_id AS "rental.rental_id",
+     rental.rental_date AS "rental.rental_date",
+     rental.inventory_id AS "rental.inventory_id",
+     rental.customer_id AS "rental.customer_id",
+     rental.return_date AS "rental.return_date",
+     rental.staff_id AS "rental.staff_id",
+     rental.last_update AS "rental.last_update"
+FROM dvds.rental
+ORDER BY rental.return_date DESC
+LIMIT 200
+OFFSET 15800;
+`)
+
+		ensureNullsLastRentalResult(t, stmt, false)
+	})
+
+	t.Run("DESC NULLS LAST", func(t *testing.T) {
+		stmt := SELECT(
+			Rental.AllColumns,
+		).FROM(
+			Rental,
+		).ORDER_BY(
+			Rental.ReturnDate.DESC().NULLS_LAST(),
+		).LIMIT(200).OFFSET(15800)
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT rental.rental_id AS "rental.rental_id",
+     rental.rental_date AS "rental.rental_date",
+     rental.inventory_id AS "rental.inventory_id",
+     rental.customer_id AS "rental.customer_id",
+     rental.return_date AS "rental.return_date",
+     rental.staff_id AS "rental.staff_id",
+     rental.last_update AS "rental.last_update"
+FROM dvds.rental
+ORDER BY rental.return_date DESC
+LIMIT 200
+OFFSET 15800;
+`)
+
+		ensureNullsLastRentalResult(t, stmt, false)
+	})
+
+	t.Run("DESC NULLS FIRST", func(t *testing.T) {
+		stmt := SELECT(
+			Rental.AllColumns,
+		).FROM(
+			Rental,
+		).ORDER_BY(
+			Rental.ReturnDate.DESC().NULLS_FIRST(),
+		).LIMIT(200)
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT rental.rental_id AS "rental.rental_id",
+     rental.rental_date AS "rental.rental_date",
+     rental.inventory_id AS "rental.inventory_id",
+     rental.customer_id AS "rental.customer_id",
+     rental.return_date AS "rental.return_date",
+     rental.staff_id AS "rental.staff_id",
+     rental.last_update AS "rental.last_update"
+FROM dvds.rental
+ORDER BY rental.return_date IS NOT NULL, rental.return_date DESC
+LIMIT 200;
+`)
+
+		ensureNullsFirstRentalResult(t, stmt, false)
+	})
+
+	t.Run("complex", func(t *testing.T) {
+		stmt := SELECT(
+			Rental.AllColumns,
+		).FROM(
+			Rental,
+		).ORDER_BY(
+			Rental.RentalID.DESC(),
+			Rental.ReturnDate.DESC().NULLS_FIRST(),
+			Rental.LastUpdate.ASC(),
+			Rental.InventoryID.ADD(Rental.RentalID).ASC().NULLS_LAST(),
+		).LIMIT(200)
+
+		testutils.AssertDebugStatementSql(t, stmt, `
+SELECT rental.rental_id AS "rental.rental_id",
+     rental.rental_date AS "rental.rental_date",
+     rental.inventory_id AS "rental.inventory_id",
+     rental.customer_id AS "rental.customer_id",
+     rental.return_date AS "rental.return_date",
+     rental.staff_id AS "rental.staff_id",
+     rental.last_update AS "rental.last_update"
+FROM dvds.rental
+ORDER BY rental.rental_id DESC, rental.return_date IS NOT NULL, rental.return_date DESC, rental.last_update ASC, (rental.inventory_id + rental.rental_id) IS NULL, rental.inventory_id + rental.rental_id ASC
+LIMIT 200;
+`)
+		require.NoError(t, stmt.Query(db, &struct{}{}))
+
+	})
+
+}
+
 func TestSubQuery(t *testing.T) {
 
-	rRatingFilms := Film.
-		SELECT(
-			Film.FilmID,
-			Film.Title,
-			Film.Rating,
-		).
-		WHERE(Film.Rating.EQ(enum.FilmRating.R)).
-		AsTable("rFilms")
+	rRatingFilms := SELECT(
+		Film.FilmID,
+		Film.Title,
+		Film.Rating,
+	).FROM(
+		Film,
+	).WHERE(
+		Film.Rating.EQ(enum.FilmRating.R),
+	).AsTable("rFilms")
 
 	rFilmID := Film.FilmID.From(rRatingFilms)
 
@@ -497,11 +868,13 @@ func TestRowLock(t *testing.T) {
 	expectedSQL := `
 SELECT *
 FROM dvds.address
+ORDER BY address.address_id
 LIMIT 3
 OFFSET 1
 FOR`
-	query := Address.
-		SELECT(STAR).
+	query := SELECT(STAR).
+		FROM(Address).
+		ORDER_BY(Address.AddressID).
 		LIMIT(3).
 		OFFSET(1)
 
@@ -510,28 +883,14 @@ FOR`
 
 		expectedQuery := expectedSQL + " " + lockTypeStr + ";\n"
 		testutils.AssertDebugStatementSql(t, query, expectedQuery, int64(3), int64(1))
-
-		tx, _ := db.Begin()
-
-		_, err := query.Exec(tx)
-		require.NoError(t, err)
-
-		err = tx.Rollback()
-		require.NoError(t, err)
+		testutils.AssertExecAndRollback(t, query, db)
 	}
 
 	for lockType, lockTypeStr := range getRowLockTestData() {
 		query.FOR(lockType.NOWAIT())
 
 		testutils.AssertDebugStatementSql(t, query, expectedSQL+" "+lockTypeStr+" NOWAIT;\n", int64(3), int64(1))
-
-		tx, _ := db.Begin()
-
-		_, err := query.Exec(tx)
-		require.NoError(t, err)
-
-		err = tx.Rollback()
-		require.NoError(t, err)
+		testutils.AssertExecAndRollback(t, query, db)
 	}
 
 	if sourceIsMariaDB() {
@@ -542,15 +901,88 @@ FOR`
 		query.FOR(lockType.SKIP_LOCKED())
 
 		testutils.AssertDebugStatementSql(t, query, expectedSQL+" "+lockTypeStr+" SKIP LOCKED;\n", int64(3), int64(1))
-
-		tx, _ := db.Begin()
-
-		_, err := query.Exec(tx)
-		require.NoError(t, err)
-
-		err = tx.Rollback()
-		require.NoError(t, err)
+		testutils.AssertExecAndRollback(t, query, db)
 	}
+}
+
+func TestRowLockWithUpdateOf(t *testing.T) {
+	skipForMariaDB(t) // MariaDB does not support UPDATE OF
+
+	stmt := SELECT(
+		Film.FilmID,
+		Film.Title,
+		Actor.ActorID,
+		Actor.FirstName,
+	).FROM(
+		Film.
+			INNER_JOIN(FilmCategory, FilmCategory.FilmID.EQ(Film.FilmID)).
+			INNER_JOIN(FilmActor, FilmActor.FilmID.EQ(Film.FilmID)).
+			INNER_JOIN(Actor, Actor.ActorID.EQ(FilmActor.ActorID)),
+	).LIMIT(
+		1,
+	).FOR(
+		UPDATE().OF(Film, Actor).NOWAIT(),
+	)
+
+	testutils.AssertDebugStatementSql(t, stmt, `
+SELECT film.film_id AS "film.film_id",
+     film.title AS "film.title",
+     actor.actor_id AS "actor.actor_id",
+     actor.first_name AS "actor.first_name"
+FROM dvds.film
+     INNER JOIN dvds.film_category ON (film_category.film_id = film.film_id)
+     INNER JOIN dvds.film_actor ON (film_actor.film_id = film.film_id)
+     INNER JOIN dvds.actor ON (actor.actor_id = film_actor.actor_id)
+LIMIT 1
+FOR UPDATE OF film, actor NOWAIT;
+`)
+
+	testutils.ExecuteInTxAndRollback(t, db, func(tx qrm.DB) {
+		var dest []struct {
+			model.Film
+			CategoryID int
+			Actor      []model.Actor
+		}
+
+		err := stmt.Query(tx, &dest)
+		require.NoError(t, err)
+		require.Len(t, dest, 1)
+	})
+}
+
+func TestRowLockWithUpdateOfAliasedTable(t *testing.T) {
+	skipForMariaDB(t) // MariaDB does not support UPDATE OF
+
+	myFilm := Film.AS("myFilm")
+
+	stmt := SELECT(
+		myFilm.FilmID,
+		myFilm.Title,
+	).FROM(
+		myFilm,
+	).LIMIT(
+		1,
+	).FOR(
+		UPDATE().OF(myFilm),
+	)
+
+	testutils.AssertDebugStatementSql(t, stmt, strings.ReplaceAll(`
+SELECT ''myFilm''.film_id AS "myFilm.film_id",
+     ''myFilm''.title AS "myFilm.title"
+FROM dvds.film AS ''myFilm''
+LIMIT 1
+FOR UPDATE OF ''myFilm'';
+`, "''", "`"))
+
+	testutils.ExecuteInTxAndRollback(t, db, func(tx qrm.DB) {
+		var dest []struct {
+			model.Film `alias:"myFilm.*"`
+		}
+
+		err := stmt.Query(db, &dest)
+		require.NoError(t, err)
+		require.Len(t, dest, 1)
+	})
 }
 
 func TestExpressionWrappers(t *testing.T) {
@@ -849,6 +1281,36 @@ LIMIT 5;
 	require.Equal(t, dest.Films[4].Title, "AFRICAN EGG")
 }
 
+func TestUseSchema(t *testing.T) {
+	UseSchema("dvds2")
+	defer UseSchema("dvds")
+
+	stmt := SELECT(
+		Film.FilmID,
+		Film.Title,
+		Film.LanguageID,
+	).FROM(
+		Film,
+	).WHERE(
+		Film.Title.EQ(String("AFRICAN EGG")),
+	)
+
+	testutils.AssertDebugStatementSql(t, stmt, `
+SELECT film.film_id AS "film.film_id",
+     film.title AS "film.title",
+     film.language_id AS "film.language_id"
+FROM dvds2.film
+WHERE film.title = 'AFRICAN EGG';
+`)
+
+	var dest model.Film
+	err := stmt.Query(db, &dest)
+	require.NoError(t, err)
+	require.Equal(t, dest.FilmID, uint16(5))
+	require.Equal(t, dest.Title, "AFRICAN EGG")
+	require.Equal(t, dest.LanguageID, uint8(1))
+}
+
 func TestLateral(t *testing.T) {
 	skipForMariaDB(t) // MariaDB does not implement LATERAL
 
@@ -1102,4 +1564,136 @@ func TestScanIntoCustomBaseTypes(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, testutils.ToJSON(films), testutils.ToJSON(myFilms))
+}
+
+func TestConditionalFunctions(t *testing.T) {
+	stmt := SELECT(
+		EXISTS(
+			Film.SELECT(Film.FilmID).WHERE(Film.RentalDuration.GT(Int(100))),
+		).AS("exists"),
+		CASE(Film.Length.GT(Int(120))).
+			WHEN(Bool(true)).THEN(String("long film")).
+			ELSE(String("short film")).AS("case"),
+		COALESCE(Film.Description, String("none")).AS("coalesce"),
+		NULLIF(Film.ReleaseYear, Int(200)).AS("null_if"),
+		GREATEST(Film.RentalDuration, Int(4), Int(5)).AS("greatest"),
+		LEAST(Film.RentalDuration, Int(7), Int(6)).AS("least"),
+	).FROM(
+		Film,
+	).WHERE(
+		Film.FilmID.LT(Int(5)),
+	).ORDER_BY(
+		Film.FilmID,
+	)
+
+	testutils.AssertDebugStatementSql(t, stmt, `
+SELECT (EXISTS (
+          SELECT film.film_id AS "film.film_id"
+          FROM dvds.film
+          WHERE film.rental_duration > 100
+     )) AS "exists",
+     (CASE (film.length > 120) WHEN TRUE THEN 'long film' ELSE 'short film' END) AS "case",
+     COALESCE(film.description, 'none') AS "coalesce",
+     NULLIF(film.release_year, 200) AS "null_if",
+     GREATEST(film.rental_duration, 4, 5) AS "greatest",
+     LEAST(film.rental_duration, 7, 6) AS "least"
+FROM dvds.film
+WHERE film.film_id < 5
+ORDER BY film.film_id;
+`)
+
+	var res []struct {
+		Exists   string
+		Case     string
+		Coalesce string
+		NullIf   string
+		Greatest string
+		Least    string
+	}
+
+	err := stmt.Query(db, &res)
+	require.NoError(t, err)
+
+	testutils.AssertJSON(t, res, `
+[
+	{
+		"Exists": "0",
+		"Case": "short film",
+		"Coalesce": "A Epic Drama of a Feminist And a Mad Scientist who must Battle a Teacher in The Canadian Rockies",
+		"NullIf": "2006",
+		"Greatest": "6",
+		"Least": "6"
+	},
+	{
+		"Exists": "0",
+		"Case": "short film",
+		"Coalesce": "A Astounding Epistle of a Database Administrator And a Explorer who must Find a Car in Ancient China",
+		"NullIf": "2006",
+		"Greatest": "5",
+		"Least": "3"
+	},
+	{
+		"Exists": "0",
+		"Case": "short film",
+		"Coalesce": "A Astounding Reflection of a Lumberjack And a Car who must Sink a Lumberjack in A Baloon Factory",
+		"NullIf": "2006",
+		"Greatest": "7",
+		"Least": "6"
+	},
+	{
+		"Exists": "0",
+		"Case": "short film",
+		"Coalesce": "A Fanciful Documentary of a Frisbee And a Lumberjack who must Chase a Monkey in A Shark Tank",
+		"NullIf": "2006",
+		"Greatest": "5",
+		"Least": "5"
+	}
+]
+`)
+}
+
+func TestSelectOptimizerHints(t *testing.T) {
+
+	stmt := SELECT(Actor.AllColumns).
+		OPTIMIZER_HINTS(MAX_EXECUTION_TIME(1), QB_NAME("mainQueryBlock"), "NO_ICP(actor)").
+		DISTINCT().
+		FROM(Actor)
+
+	testutils.AssertDebugStatementSql(t, stmt, `
+SELECT /*+ MAX_EXECUTION_TIME(1) QB_NAME(mainQueryBlock) NO_ICP(actor) */ DISTINCT actor.actor_id AS "actor.actor_id",
+     actor.first_name AS "actor.first_name",
+     actor.last_name AS "actor.last_name",
+     actor.last_update AS "actor.last_update"
+FROM dvds.actor;
+`)
+
+	var actors []model.Actor
+
+	err := stmt.QueryContext(context.Background(), db, &actors)
+	require.NoError(t, err)
+	require.Len(t, actors, 200)
+}
+
+func TestUUIDFunctions(t *testing.T) {
+	skipForMariaDB(t)
+
+	stmt := SELECT(
+		UUID_TO_BIN(String("4255e382-1c10-4ac0-ba5b-039ca7a8525f")).AS("bin"),
+	)
+
+	testutils.AssertDebugStatementSql(t, stmt, `
+SELECT uuid_to_bin('4255e382-1c10-4ac0-ba5b-039ca7a8525f') AS "bin";
+`)
+
+	var dest struct {
+		Bin []byte
+	}
+
+	err := stmt.Query(db, &dest)
+	require.NoError(t, err)
+	testutils.AssertJSON(t, dest, `
+{
+	"Bin": "QlXjghwQSsC6WwOcp6hSXw=="
+}
+`)
 }

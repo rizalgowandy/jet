@@ -83,10 +83,10 @@ SELECT orders.ship_region AS "orders.ship_region",
      SUM(order_details.quantity) AS "product_sales"
 FROM northwind.orders
      INNER JOIN northwind.order_details ON (orders.order_id = order_details.order_id)
-WHERE orders.ship_region IN (
+WHERE orders.ship_region IN ((
            SELECT top_region."orders.ship_region" AS "orders.ship_region"
            FROM top_region
-      )
+      ))
 GROUP BY orders.ship_region, order_details.product_id
 ORDER BY SUM(order_details.quantity) DESC;
 `)
@@ -106,9 +106,11 @@ func TestWithStatementDeleteAndInsert(t *testing.T) {
 		removeDiscontinuedOrders.AS(
 			OrderDetails.DELETE().
 				WHERE(OrderDetails.ProductID.IN(
-					SELECT(Products.ProductID).
-						FROM(Products).
-						WHERE(Products.Discontinued.EQ(Int(1)))),
+					SELECT(
+						Products.ProductID,
+					).FROM(
+						Products,
+					).WHERE(Products.Discontinued.EQ(Int(1)))),
 				).RETURNING(OrderDetails.ProductID),
 		),
 		updateDiscontinuedPrice.AS(
@@ -121,7 +123,13 @@ func TestWithStatementDeleteAndInsert(t *testing.T) {
 		),
 		logDiscontinuedProducts.AS(
 			ProductLogs.INSERT(ProductLogs.AllColumns).
-				QUERY(SELECT(updateDiscontinuedPrice.AllColumns()).FROM(updateDiscontinuedPrice)).
+				QUERY(
+					SELECT(
+						updateDiscontinuedPrice.AllColumns(),
+					).FROM(
+						updateDiscontinuedPrice,
+					),
+				).
 				RETURNING(
 					ProductLogs.ProductID,
 					ProductLogs.ProductName,
@@ -149,19 +157,19 @@ func TestWithStatementDeleteAndInsert(t *testing.T) {
 	testutils.AssertStatementSql(t, stmt, `
 WITH remove_discontinued_orders AS (
      DELETE FROM northwind.order_details
-     WHERE order_details.product_id IN (
+     WHERE order_details.product_id IN ((
                 SELECT products.product_id AS "products.product_id"
                 FROM northwind.products
                 WHERE products.discontinued = $1
-           )
+           ))
      RETURNING order_details.product_id AS "order_details.product_id"
 ),update_discontinued_price AS (
      UPDATE northwind.products
      SET unit_price = $2
-     WHERE products.product_id IN (
+     WHERE products.product_id IN ((
                 SELECT remove_discontinued_orders."order_details.product_id" AS "order_details.product_id"
                 FROM remove_discontinued_orders
-           )
+           ))
      RETURNING products.product_id AS "products.product_id",
                products.product_name AS "products.product_name",
                products.supplier_id AS "products.supplier_id",
@@ -384,7 +392,7 @@ WITH cte1 AS (
      SELECT territories.territory_id AS "territories.territory_id",
           territories.territory_description AS "territories.territory_description",
           territories.region_id AS "territories.region_id",
-          $1 AS "custom_column_1"
+          $1::text AS "custom_column_1"
      FROM northwind.territories
      ORDER BY territories.territory_id ASC
 ),cte2 AS (
@@ -392,7 +400,7 @@ WITH cte1 AS (
           cte1."territories.territory_description" AS "territories.territory_description",
           cte1."territories.region_id" AS "territories.region_id",
           cte1.custom_column_1 AS "custom_column_1",
-          $2 AS "custom_column_2"
+          $2::text AS "custom_column_2"
      FROM cte1
 )
 SELECT cte2."territories.territory_id" AS "territories.territory_id",
@@ -485,7 +493,7 @@ func TestRecursiveWithStatement(t *testing.T) {
 				Employees,
 			).WHERE(
 				Employees.EmployeeID.EQ(Int(2)),
-			).UNION(
+			).UNION_ALL(
 				SELECT(
 					Employees.AllColumns,
 				).FROM(
@@ -790,13 +798,13 @@ WITH suppliers_fax AS (
           suppliers_fax."suppliers.contact_name" AS "suppliers.contact_name",
           suppliers_fax."suppliers.country" AS "suppliers.country"
      FROM suppliers_fax
-     WHERE suppliers_fax."suppliers.country" NOT IN ('US', 'Australia')
+     WHERE suppliers_fax."suppliers.country" NOT IN ('US'::text, 'Australia'::text)
 )
 SELECT not_from_us_or_aus."suppliers.supplier_id" AS "suppliers.supplier_id",
      not_from_us_or_aus."suppliers.contact_name" AS "suppliers.contact_name",
      not_from_us_or_aus."suppliers.country" AS "suppliers.country"
 FROM not_from_us_or_aus
-WHERE not_from_us_or_aus."suppliers.contact_name" != 'John';
+WHERE not_from_us_or_aus."suppliers.contact_name" != 'John'::text;
 `)
 
 	var dest []model.Suppliers

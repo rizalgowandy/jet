@@ -1,9 +1,11 @@
 package jet
 
 import (
-	"github.com/go-jet/jet/v2/internal/utils"
 	"reflect"
 	"strings"
+
+	"github.com/go-jet/jet/v2/internal/utils/dbidentifier"
+	"github.com/go-jet/jet/v2/internal/utils/must"
 )
 
 // SerializeClauseList func
@@ -150,11 +152,11 @@ func UnwindRowFromModel(columns []Column, data interface{}) []Serializer {
 
 	row := []Serializer{}
 
-	utils.ValueMustBe(structValue, reflect.Struct, "jet: data has to be a struct")
+	must.ValueBeOfTypeKind(structValue, reflect.Struct, "jet: data has to be a struct")
 
 	for _, column := range columns {
 		columnName := column.Name()
-		structFieldName := utils.ToGoIdentifier(columnName)
+		structFieldName := dbidentifier.ToGoIdentifier(columnName)
 
 		structField := structValue.FieldByName(structFieldName)
 
@@ -179,7 +181,7 @@ func UnwindRowFromModel(columns []Column, data interface{}) []Serializer {
 // UnwindRowsFromModels func
 func UnwindRowsFromModels(columns []Column, data interface{}) [][]Serializer {
 	sliceValue := reflect.Indirect(reflect.ValueOf(data))
-	utils.ValueMustBe(sliceValue, reflect.Slice, "jet: data has to be a slice.")
+	must.ValueBeOfTypeKind(sliceValue, reflect.Slice, "jet: data has to be a slice.")
 
 	rows := [][]Serializer{}
 
@@ -276,4 +278,16 @@ func serializeToDefaultDebugString(expr Serializer) string {
 	out := SQLBuilder{Dialect: defaultDialect, Debug: true}
 	expr.serialize(SelectStatementType, &out)
 	return out.Buff.String()
+}
+
+// joinAlias examples:
+//
+//	joinAlias("foo", "bar") // "foo.bar"
+//	joinAlias("foo.*", "bar") // "foo.bar"
+//	joinAlias("", "bar") // "bar"
+func joinAlias(tableAlias, columnAlias string) string {
+	if tableAlias == "" {
+		return columnAlias
+	}
+	return strings.TrimRight(tableAlias, ".*") + "." + columnAlias
 }
